@@ -1,3 +1,5 @@
+This project implements a Decision Transformer-based autonomous driving agent in the Genesis4D simulation environment.
+
 # 🚗 Genesis4D + Decision Transformer 自動運転エージェント
 
 このプロジェクトは、Genesis4D シミュレーション環境上で Decision Transformer を用いた
