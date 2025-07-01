@@ -20,12 +20,14 @@
 ## 🚀 実行方法
 
 1) 環境を再現する
-	conda env create -n genesis_env_v2 -f genesis_env.yml
+conda env create -n genesis_env_v2 -f genesis_env.yml
+
 2) Genesis を手動で組み込む
-	conda activate genesis_env_v2
-	pip install -e C:\Users\kws00\Genesis4D
+conda activate genesis_env_v2
+pip install -e C:\Users\kws00\Genesis4D
+
 3) 実行する
-	evolution_trainer.py
+evolution_trainer.py
 
 ![デモ動画](media/demo.gif)
 
