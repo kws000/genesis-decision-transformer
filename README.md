@@ -3,6 +3,7 @@
 このプロジェクトは、Genesis4D シミュレーション環境上で Decision Transformer を用いた
 自動運転エージェントの学習と評価を行うものです。
 
+
 ## 📌 目的
 - Transformerベースの強化学習手法を自動運転に応用する
 - 世代進化を繰り返し、高度な運転知能を獲得できるかの検証
@@ -25,5 +26,7 @@
 	pip install -e C:\Users\kws00\Genesis4D
 3) 実行する
 	evolution_trainer.py
+
+![デモ動画](media/demo.gif)
 
 
