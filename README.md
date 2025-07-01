@@ -10,12 +10,12 @@
 - シミュレーション環境での再現性ある検証
 
 ## 🧠 使用技術
-- Python / PyTorch / NumPy
-- Decision Transformer
-- Soft Actor-Critic
-- ControlMLP
-- Pure-Pursuit
-- Genesis4D（0.3.0.dev）
+- `Python` / `PyTorch` / `NumPy`
+- `Decision Transformer`
+- `Soft Actor-Critic`
+- `ControlMLP`
+- `Pure-Pursuit`
+- `Genesis4D`（0.3.0.dev）
 
 ## 🚀 実行方法
 
@@ -26,7 +26,7 @@ conda env create -n genesis_env_v2 -f genesis_env.yml
 `2. Genesis を手動で組み込む`
 
 conda activate genesis_env_v2
-pip install -e C:\Users\kws00\Genesis4D
+pip install -e C:\Users\my_user\Genesis4D
 
 `3. 実行する`
 
