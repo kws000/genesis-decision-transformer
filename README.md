@@ -19,6 +19,16 @@ This project implements a Decision Transformer-based autonomous driving agent in
 - `Pure-Pursuit`
 - `Genesis4D`（0.3.0.dev）
 
+## 📁 Project Structure
+      project/ 
+         ├── evolution_trainer.py 
+         ├── config/ 
+         ├── models/ 
+         ├── media/ 
+         │   └── demo.gif 
+         ├── README.md 
+         └── genesis_env.yml
+
 ## 🚀 実行方法
 
 `1. 環境を再現する`
