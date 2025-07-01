@@ -46,4 +46,6 @@ This project implements a Decision Transformer-based autonomous driving agent in
 
 ![デモ動画](media/demo.gif)
 
+## 📄 License
 
+This project is licensed under the MIT License.
