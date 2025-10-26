@@ -20,7 +20,13 @@ import threading
 import random
 import pyautogui
 
+## プロンプト生成で町を作る
+#from genesis import generate_scene_from_prompt
+#from genesis.scene import Scene
+#from genesis.viewer import Viewer
 
+# プロンプト生成で町を作る
+PROMPT_MODE = False#True
 
 #最新モデルでリプレイする※作りかけ封印
 #REPLAY_MODE = True
@@ -31,7 +37,7 @@ V_EPS = 0.5#0.1            # 最低速度下限 [m/s]
 MAX_STEER_RAD = 3.1415926535 * 80.0 / 180    # ステア最大角度
 
 # ビュアーやSleepをスキップする高速モード
-is_mode_fast = True#False
+is_mode_fast = False#True#False
 
 
 
@@ -42,21 +48,30 @@ class GenesisScene:
 
         gs.init(backend=gs.gpu,logging_level="warning")
 
-        self.scene = gs.Scene(
-            sim_options=gs.options.SimOptions(gravity=(0, 0, -9.81)),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(1, 1, 5),
-                camera_lookat=(0, 0, 0),
-            ),
-            show_viewer=False if is_mode_fast else True,
-        )
+        # プロンプト生成で町を作る
+        if PROMPT_MODE == True:
 
-# 効かない
-#        # ビューワーの設定をカスタマイズ
-#        viewer_config = gs.ViewerConfig()
-#        viewer_config.window_width = 512
-#        viewer_config.window_height = 512
-#        self.scene.set_viewer(True, viewer_config)
+            # プロンプト例（他にも後で調整可）
+            prompt = "a small town with curved roads and a park in the center"
+
+#まだ公開されていない機能
+#            # プロンプトからシーン生成
+#            self.Scene = generate_scene_from_prompt(prompt)
+#
+#            # Viewerで可視化
+#            viewer = Viewer(self.scene)
+#            viewer.run()
+
+        else:
+
+            self.scene = gs.Scene(
+                sim_options=gs.options.SimOptions(gravity=(0, 0, -9.81)),
+                viewer_options=gs.options.ViewerOptions(
+                    camera_pos=(1, 1, 5),
+                    camera_lookat=(0, 0, 0),
+                ),
+                show_viewer=False if is_mode_fast else True,
+            )
 
        # 乱数シード
         random.seed(time.time())  # 毎回違うシードになる
@@ -193,7 +208,8 @@ class GenesisScene:
         yaw = np.arctan2(y, x)
         pitch = np.arctan2(-z, np.sqrt(x**2 + y**2))
         roll = 0  # ロールは定義できない（方向ベクトルだけでは不定）
-        return np.degrees([roll, pitch, yaw])
+        return [roll, pitch, yaw]
+#        return np.degrees([roll, pitch, yaw])
 
     def set_car_start_pos(self,car,waypoint_idx: int,waypoint_direc: int):
 

@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn as nn
-import intel_npu_acceleration_library  # これでNPUバックエンドが登録される
+#import intel_npu_acceleration_library  # これでNPUバックエンドが登録される
 
 from torch.utils.data import DataLoader
 import argparse

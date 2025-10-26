@@ -106,7 +106,8 @@ def vector_to_euler(v):
     yaw = np.arctan2(y, x)
     pitch = np.arctan2(-z, np.sqrt(x**2 + y**2))
     roll = 0  # ロールは定義できない（方向ベクトルだけでは不定）
-    return np.degrees([roll, pitch, yaw])
+    return [roll, pitch, yaw]
+#    return np.degrees([roll, pitch, yaw])
 
 def set_car_start_pos(car,waypoint_idx: int,waypoint_direc: int):
 
@@ -675,7 +676,13 @@ def run_control_loop(scene, car,sphere,bc_model):
 # ---------------------------------------------------------------------------
 def build_scene(path_to_mjcf: str | Path):
 
-    gs.init(backend=gs.gpu,logging_level="warning")  # ← CPU でも OK
+
+#急にエラーで動かなくなった、、、
+#   Backend tkagg is interactive backend. Turning interactive mode on.
+#   [Genesis] [01:24:48] [WARNING] No Intel XPU device available. Falling back to CPU for torch device.
+#   Assertion failed: pCreateInfo->vulkanApiVersion == 0 || (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 22U) == 1 && (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 12U) & 0x3FFU) <= 3), file C:\Users\buildbot\actions-runner\_work\taichi\taichi\external\VulkanMemoryAllocator\include\vk_mem_alloc.h, line 16039
+    gs.init(backend=gs.cpu)
+#gs.init(backend=gs.gpu,logging_level="warning")  # ← CPU でも OK
     
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(gravity=(0, 0, -9.81)),

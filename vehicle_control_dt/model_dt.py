@@ -369,8 +369,8 @@ class DecisionTransformer_Step7(nn.Module):
         return self.predict_action(x)  # → (B, T, act_dim)
 
 # DTのMLP化検証 復元step8
-#class DecisionTransformer_Step8(nn.Module):
 class DecisionTransformer(nn.Module):
+#class DecisionTransformer_Step8(nn.Module):
     def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4):#段階的拡張の開始設定
 #    def __init__(self, obs_dim, act_dim, context_len=5, embed_dim=128, n_layer=3, n_head=4):
         super().__init__()
@@ -421,6 +421,147 @@ class DecisionTransformer(nn.Module):
         x = x[:, 0::3]  # → (B, T, D)
 
         return self.predict_action(x)  # → (B, T, act_dim)
+
+
+#最新アテンションマップ対応(step8ベース)
+class DecisionTransformer_Step8_NewAttn(nn.Module):
+#class DecisionTransformer(nn.Module):
+    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.context_len = context_len
+        self.embed_dim = embed_dim
+        self.n_head = n_head
+
+        self.embed_timestep = nn.Embedding(timestep_max, embed_dim)
+        self.embed_return   = nn.Linear(1, embed_dim)
+        self.embed_state    = nn.Linear(obs_dim, embed_dim)
+        self.embed_action   = nn.Linear(act_dim, embed_dim)
+        self.dropout        = nn.Dropout(0.1)
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head, batch_first=False)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layer)
+
+        self.predict_action = nn.Sequential(nn.Linear(embed_dim, act_dim))
+
+        # ---- attention capture (monkey-patch方式) ----
+        self._attn_weights = []          # list of (B, heads, Lq, Lk)
+        self._attn_patches = []          # list of (attn_module, orig_forward)
+        self._self_attn_layers = [self.transformer.layers[i].self_attn for i in range(n_layer)]
+
+    # ★★ これだけを使う：重みを必ず返すよう forward をラップ
+    def enable_attention_hook(self, enabled: bool = True):
+        # 既存パッチ解除
+        for attn, orig_fwd in self._attn_patches:
+            attn.forward = orig_fwd
+        self._attn_patches.clear()
+        self._attn_weights.clear()
+
+        if not enabled:
+            return
+
+        def make_wrapped(attn_mod):
+            orig_forward = attn_mod.forward
+            def wrapped_forward(query, key, value, **kwargs):
+                kwargs["need_weights"] = True
+                kwargs["average_attn_weights"] = False  # ヘッド別
+                out, w = orig_forward(query, key, value, **kwargs)
+                # 形状統一
+                if w is not None:
+                    if w.dim() == 2:      # (Lq, Lk)
+                        w = w.unsqueeze(0).unsqueeze(0)          # (1,1,Lq,Lk)
+                    elif w.dim() == 3:    # (B, Lq, Lk)
+                        w = w.unsqueeze(1)                        # (B,1,Lq,Lk)
+                    self._attn_weights.append(w.detach().cpu())
+                return out, w
+            return orig_forward, wrapped_forward
+
+        for attn in self._self_attn_layers:
+            orig_fwd, wrapped_fwd = make_wrapped(attn)
+            self._attn_patches.append((attn, orig_fwd))
+            attn.forward = wrapped_fwd
+            setattr(attn, "_patched", True)  # ← デバッグ用フラグ
+
+    def disable_attention_hook(self):
+        for attn, orig_fwd in self._attn_patches:
+            attn.forward = orig_fwd
+        self._attn_patches.clear()
+
+    def get_collected_attn(self):
+        return self._attn_weights
+
+    def forward(self, timesteps, states, actions, returns_to_go):
+        B, T = states.shape[0], states.shape[1]
+        if timesteps.ndim == 3:
+            timesteps = timesteps.squeeze(-1)
+
+        time_emb   = self.embed_timestep(timesteps)
+        state_emb  = self.embed_state(states) + time_emb
+        action_emb = self.embed_action(actions) + time_emb
+        return_emb = self.embed_return(returns_to_go) + time_emb
+
+        stacked = torch.stack((state_emb, action_emb, return_emb), dim=2)  # (B,T,3,D)
+        x = stacked.view(B, -1, self.embed_dim)                            # (B,3T,D)
+
+        x = self.dropout(x)
+        x = x.permute(1, 0, 2)        # (3T,B,D)
+        x = self.transformer(x)       # ← ここで各層の self_attn がラップされ、重みを収集
+        x = x.permute(1, 0, 2)        # (B,3T,D)
+
+        x = x[:, 0::3]                # stateトークンのみ
+        return self.predict_action(x)
+
+    # DecisionTransformer クラスの中に追記（@torch.no_grad は任意）
+    @torch.no_grad()
+    def get_qkv_weights(self):
+        """
+        各層の Q/K/V/O の重みを返す。
+        返り値: list[ { "W_q","b_q","W_k","b_k","W_v","b_v","W_o","b_o" } ] 
+        すべて torch.Tensor（biasは None の事もあり）。
+        """
+        mats = []
+        for layer in self.transformer.layers:
+            attn = layer.self_attn
+
+            # PyTorchの実装差異に配慮（通常は in_proj_weight がある）
+            if getattr(attn, "in_proj_weight", None) is not None:
+                # in_proj_weight = [W_q; W_k; W_v] 連結 (3D, D)
+                W_in = attn.in_proj_weight.detach()
+                b_in = attn.in_proj_bias.detach() if attn.in_proj_bias is not None else None
+                W_q, W_k, W_v = torch.split(W_in, self.embed_dim, dim=0)
+                if b_in is not None:
+                    b_q, b_k, b_v = torch.split(b_in, self.embed_dim, dim=0)
+                else:
+                    b_q = b_k = b_v = None
+            else:
+                # まれに分離プロジェクションのケース（保険）
+                W_q = getattr(attn, "q_proj_weight").detach()
+                W_k = getattr(attn, "k_proj_weight").detach()
+                W_v = getattr(attn, "v_proj_weight").detach()
+                b_q = getattr(attn, "q_proj_bias", None)
+                b_k = getattr(attn, "k_proj_bias", None)
+                b_v = getattr(attn, "v_proj_bias", None)
+                if b_q is not None: b_q = b_q.detach()
+                if b_k is not None: b_k = b_k.detach()
+                if b_v is not None: b_v = b_v.detach()
+
+            W_o = attn.out_proj.weight.detach()
+            b_o = attn.out_proj.bias.detach() if attn.out_proj.bias is not None else None
+
+            mats.append({
+                "W_q": W_q, "b_q": b_q,
+                "W_k": W_k, "b_k": b_k,
+                "W_v": W_v, "b_v": b_v,
+                "W_o": W_o, "b_o": b_o
+            })
+        return mats
+
+    @torch.no_grad()
+    def get_state_embed_weight(self):
+        """観測ベクトル → 埋め込み への線形層の重み (D, obs_dim) を返す"""
+        return self.embed_state.weight.detach()
+
 
 # DTのMLP化検証 復元step8attn
 class DecisionTransformer_Step8_Attn(nn.Module):
