@@ -46,7 +46,8 @@ class GenesisScene:
     
     def __init__(self):
 
-        gs.init(backend=gs.gpu,logging_level="warning")
+        gs.init(backend=gs.cpu)
+#        gs.init(backend=gs.gpu,logging_level="warning")
 
         # プロンプト生成で町を作る
         if PROMPT_MODE == True:
