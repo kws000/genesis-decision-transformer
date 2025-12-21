@@ -6,12 +6,12 @@ import gym
 import numpy as np
 from gym import spaces
 
-import genesis as gs
+import genesis as gs # type: ignore
+from genesis.utils.geom  import euler_to_quat # type: ignore
 
 import math
 from math import radians
 
-from genesis.utils.geom  import euler_to_quat
 
 from utils.trajectory_utils import yaw_to_sin_cos
 from utils.trajectory_utils import sin_cos_to_yaw
@@ -19,6 +19,18 @@ from utils.trajectory_utils import sin_cos_to_yaw
 import threading
 import random
 import pyautogui
+
+
+
+#計画と行動のマルチタスクモデル
+import gymnasium as gym
+from gymnasium import spaces
+from typing import Optional, Dict
+import numpy as np
+
+#計画と行動のマルチタスクモデル
+from typing import Optional, Tuple
+
 
 ## プロンプト生成で町を作る
 #from genesis import generate_scene_from_prompt
@@ -46,8 +58,12 @@ class GenesisScene:
     
     def __init__(self):
 
-        gs.init(backend=gs.cpu)
-#        gs.init(backend=gs.gpu,logging_level="warning")
+#急にエラーで動かなくなった、、、
+#   Backend tkagg is interactive backend. Turning interactive mode on.
+#   [Genesis] [01:24:48] [WARNING] No Intel XPU device available. Falling back to CPU for torch device.
+#   Assertion failed: pCreateInfo->vulkanApiVersion == 0 || (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 22U) == 1 && (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 12U) & 0x3FFU) <= 3), file C:\Users\buildbot\actions-runner\_work\taichi\taichi\external\VulkanMemoryAllocator\include\vk_mem_alloc.h, line 16039
+        gs.init(backend=gs.cpu,logging_level="warning")
+#gs.init(backend=gs.gpu,logging_level="warning")  # ← CPU でも OK
 
         # プロンプト生成で町を作る
         if PROMPT_MODE == True:
@@ -117,6 +133,7 @@ class GenesisScene:
         # Debug arrow
         self.debug_arrow_segment = None
         self.debug_arrow_target = None
+        self.debug_arrow_plan = None
 
 
         self.lock = threading.Lock()
@@ -201,6 +218,74 @@ class GenesisScene:
         wp_idx = wp_idx % len(waypoints)
 
         return waypoints[wp_idx][:2]
+
+
+#計画と行動のマルチタスクモデル
+    def get_wp_preview(self, K: int = 40) -> np.ndarray:
+        """
+        前方K点のWPプレビューを車体座標で返す。
+        出力: (K,5) 各行 = (dx, dy, s, kappa, width)
+        - s    : 先頭からの弧長[m]
+        - kappa: 近傍三点からの離散曲率近似
+        - width: 路幅（未取得なら定数）
+        """
+        # 依存：self.scene.waypoints (Nx2), self.scene.start_waypoint_idx, self.scene.waypoint_direc
+        waypoints = self.waypoints  # shape (N,2)
+        N = waypoints.shape[0]
+        idx = int(self.waypoint_idx)
+        direc = int(self.waypoint_direc)  # +1 or -1
+
+        # 車体姿勢
+#取り方があります        
+        ego_pos = np.array(self.car.get_dofs_position())[:2]
+        quat = self.car.get_links_quat()[0]  # chassisの回転（w, x, y, z）
+        siny_cosp = 2 * (quat[0]*quat[3] + quat[1]*quat[2])
+        cosy_cosp = 1 - 2 * (quat[2]**2 + quat[3]**2)
+        ego_yaw = math.atan2(siny_cosp, cosy_cosp)
+#        ego_pos = self.car.position[:2]    # (x,y)
+#        ego_yaw = float(self.car.yaw)      # [rad]
+
+        pts_world = []
+        cur = idx
+        for i in range(K+2):  # 曲率用に+2
+            pts_world.append(self.get_wp_position(cur, waypoints))
+            cur = (cur + direc) % N
+        pts_world = np.asarray(pts_world)  # (K+2,2)
+
+        # 弧長 s と曲率 kappa を近似
+        seg = np.diff(pts_world[:K+1], axis=0)         # (K+1,2)
+        ds = np.sqrt((seg**2).sum(axis=1))             # (K+1,)
+        s_acc = np.concatenate([[0.0], np.cumsum(ds)]) # (K+2,) 末尾余るがKで切る
+
+        # 曲率: 三点円近似
+        kappa = np.zeros(K)
+        pwm1 = pts_world[:-2]
+        pw   = pts_world[1:-1]
+        pwp1 = pts_world[2:]
+        v1 = pw - pwm1
+        v2 = pwp1 - pw
+        cross = v1[:,0]*v2[:,1] - v1[:,1]*v2[:,0]
+        d1 = np.sqrt((v1**2).sum(axis=1))
+        d2 = np.sqrt((v2**2).sum(axis=1))
+        denom = d1 * d2 * np.sqrt(((pwp1 - pwm1)**2).sum(axis=1)) + 1e-8
+        kappa[1:-1] = 2.0 * cross[1:-1] / denom[1:-1]
+        kappa[0] = kappa[1]
+        kappa[-1] = kappa[-2]
+
+        # 車体座標へ
+        wp_feats = np.zeros((K, 5), dtype=np.float32)
+        width = getattr(self, "road_width", 4.0)
+        for i in range(K):
+            wx, wy = pts_world[i+1]
+            dx, dy = self._world_to_ego(wx, wy, ego_pos, ego_yaw)
+            wp_feats[i, 0] = dx
+            wp_feats[i, 1] = dy
+            wp_feats[i, 2] = float(s_acc[i+1])
+            wp_feats[i, 3] = float(kappa[i])
+            wp_feats[i, 4] = float(width)
+        return wp_feats
+
+
 
     # vは正規化不要とのこと
     #roll pitch yaw の順は ROS では標準
@@ -375,6 +460,7 @@ class GenesisScene:
 
         # ステップ実行後
         obs = self._get_obs()
+
         reward = self._compute_reward(obs,self.t)
 
         # 制限時間かコースアウトなら学習終了
@@ -431,6 +517,46 @@ class GenesisScene:
         else:
             return False
 
+    def ego_to_world_batch(self,plan_xy: np.ndarray, pos_xy: np.ndarray, yaw: float) -> np.ndarray:
+        """
+        plan_xy: (2M,) = [x1,y1,...]  (ego座標, x前方/ y左+)
+        pos_xy : (2,)   vehicle world position (x,y)
+        yaw    : float  vehicle yaw [rad]
+        return : (M,2) world XY
+        """
+        assert plan_xy.ndim == 1 and plan_xy.size % 2 == 0
+        M = plan_xy.size // 2
+        pts = plan_xy.reshape(M, 2).astype(np.float32)  # (M,2) [ex,ey]
+        c, s = np.cos(yaw), np.sin(yaw)
+        # world = R(yaw) @ ego + pos
+        wx = c * pts[:, 0] - s * pts[:, 1] + pos_xy[0]
+        wy = s * pts[:, 0] + c * pts[:, 1] + pos_xy[1]
+        return np.stack([wx, wy], axis=1)  # (M,2)
+
+    def debug_draw_plan_xy(self,debug_plan_xy):
+        
+        # 車体位置・姿勢の取得（GenesisScene側のプロパティ名に合わせてください）
+        car_pos_xy = np.array(self.car.get_dofs_position())[:2]
+
+        quat = self.car.get_links_quat()[0]  # chassisの回転（w, x, y, z）
+        siny_cosp = 2 * (quat[0]*quat[3] + quat[1]*quat[2])
+        cosy_cosp = 1 - 2 * (quat[2]**2 + quat[3]**2)
+        car_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        plan_xy_world = self.ego_to_world_batch(debug_plan_xy, car_pos_xy, car_yaw)  # (M,2)
+
+        vec_x = plan_xy_world[0] - car_pos_xy[0]
+        vec_y = plan_xy_world[1] - car_pos_xy[1]
+
+        # Debug arrow
+        if self.debug_arrow_plan is not None:
+            self.scene.clear_debug_object(self.debug_arrow_plan)
+
+        self.debug_arrow_plan = self.scene.draw_debug_arrow(
+                pos=(car_pos_xy[0], car_pos_xy[1], 0.1),
+                vec=(vec_x, vec_y, 0.0),
+                radius=0.005, color=(0, 1, 1, 0.5))  # LightBlue
+
     def _get_obs(self):
 
         # — DOF index —
@@ -470,10 +596,15 @@ class GenesisScene:
         # セグメント方向
         segment = target_next_wp - target_wp
 
+        # セグメント距離
+        segment_len = np.linalg.norm(segment)
+        if segment_len > 0.001:
+            scale = 0.5 * (1.0 / segment_len)
+        else:
+            scale = 1.0
 
         # ターゲット球
         if self.sphere is not None:
-
             # lookaheadによる動的算出位置
             self.sphere.set_pos((
                 target_wp[0],
@@ -483,12 +614,6 @@ class GenesisScene:
         # Debug arrow
         if self.debug_arrow_segment is not None:
             self.scene.clear_debug_object(self.debug_arrow_segment)
-
-        segment_len = np.linalg.norm(segment)
-        if segment_len > 0.001:
-            scale = 0.5 * (1.0 / segment_len)
-        else:
-            scale = 1.0
 
         self.debug_arrow_segment = self.scene.draw_debug_arrow(
                 pos=(target_wp[0], target_wp[1], 0.1),
@@ -540,11 +665,29 @@ class GenesisScene:
         if self.waypoint_idx == self.start_waypoint_idx:
             perp_error = 0.0
 
-# 断続しないヨー角 １０次元に
+		#計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
+        target_wp_subvec = target_wp - pos
+        target_wp_relative_x =  math.cos(yaw)*target_wp_subvec[0] + math.sin(yaw)*target_wp_subvec[1]
+        target_wp_relative_y = -math.sin(yaw)*target_wp_subvec[0] + math.cos(yaw)*target_wp_subvec[1]
+
         car_yaw_sin,car_yaw_cos = yaw_to_sin_cos(yaw)
-        return np.array([target_wp[0], target_wp[1], pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
-#        # ９次元に拡張し順序を合わせる　要素が間違っている
-#        return np.array([target_wp[0], target_wp[1], pos[0], pos[1], yaw, vel, perp_error, heading_error,passed], dtype=np.float32)
+
+#計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
+        return np.array([target_wp_relative_x, target_wp_relative_y, pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
+#        return np.array([target_wp[0], target_wp[1], pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
+
+
+#計画と行動のマルチタスクモデル
+    def _world_to_ego(self, px: float, py: float, ego_pos: np.ndarray, ego_yaw: float) -> Tuple[float, float]:
+        dx = px - ego_pos[0]
+        dy = py - ego_pos[1]
+        c, s = np.cos(-ego_yaw), np.sin(-ego_yaw)
+        ex = c*dx - s*dy
+        ey = s*dx + c*dy
+        return ex, ey
+
+
+
 
     def _compute_reward(self, obs, t):
         # obs = [x, y, yaw, speed, cross_track_err, heading_err]
@@ -598,20 +741,52 @@ class GenesisEnv(gym.Env):
     def __init__(self):
         super().__init__()
 
-        self.action_space = spaces.Box(low=np.array([-1.0, -1.0]),
-                                       high=np.array([1.0, 1.0]), dtype=np.float32)
-
-        # _get_obs の要素を増やしたら、shapeの数を増やす必要がある
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
-
+#計画と行動のマルチタスクモデル
         self.scene = GenesisScene()
+        # 実観測からshapeを自動決定
+        obs0 = self.scene._get_obs().astype(np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=obs0.shape, dtype=np.float32)
+        # アクション範囲（自前フィールドも保持）
+        self._act_low  = np.array([-1.0,  0.0], dtype=np.float32)   # steer∈[-1,1], throttle∈[0,1]
+        self._act_high = np.array([ 1.0,  1.0], dtype=np.float32)
+        self.action_space = spaces.Box(low=self._act_low, high=self._act_high, dtype=np.float32)
+#        self.action_space = spaces.Box(low=np.array([-1.0, -1.0]),
+#                                       high=np.array([1.0, 1.0]), dtype=np.float32)
+#
+#        # _get_obs の要素を増やしたら、shapeの数を増やす必要がある
+#        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
+#
+#        self.scene = GenesisScene()
 
-    def reset(self):
-        return self.scene.reset()
 
+#計画と行動のマルチタスクモデル
+    def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None):
+        """Gymnasium API: (obs, info) を返す"""
+        super().reset(seed=seed)
+        scene_seed = getattr(self.scene, "seed", None)
+        if seed is not None and callable(scene_seed):
+            scene_seed(seed)
+        self.scene.reset()
+        obs = self.scene._get_obs().astype(np.float32)
+        return obs, {}
+#    def reset(self):
+#        return self.scene.reset()
+
+
+#計画と行動のマルチタスクモデル
     def step(self, action):
-        steer, throttle = action
-        return self.scene.step(steer, throttle)
+        """Gymnasium API: (obs, reward, terminated, truncated, info)"""
+        a = np.asarray(action, dtype=np.float32)
+        a = np.clip(a, self._act_low, self._act_high)
+        steer, throttle = float(a[0]), float(a[1])
+        # 既存シーンが (obs, reward, done, info) を返す想定 → Gymnasium形式に変換
+        obs, reward, done, info = self.scene.step(steer, throttle)
+        terminated = bool(done)
+        truncated  = bool(info.get("truncated", False))
+        return np.asarray(obs, dtype=np.float32), float(reward), terminated, truncated, info
+#    def step(self, action):
+#        steer, throttle = action
+#        return self.scene.step(steer, throttle)
 
     def close(self):
         self.scene.close()

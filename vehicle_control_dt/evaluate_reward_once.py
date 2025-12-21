@@ -11,9 +11,19 @@ from train_dt import SequenceDataset  # または TrajectoryDataset
 from genesis_gym_env import GenesisEnv  # 必要に応じて調整
 from utils.trajectory_utils import normalize
 
+#計画と行動のマルチタスクモデル
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+from typing import Optional, Dict, Tuple
 
 TIMESTEP_MAX = 4000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#計画と行動のマルチタスクモデル
+K_WP = 40
+PLAN_M = 3
+
 
 # ここで暫定モデル temp_model.pt がロードされる
 CHECKPOINT_PATH = "checkpoints/temp_model.pt"
@@ -24,26 +34,62 @@ INITIAL_RTG = 100.0
 USE_FIXED_RTG = True
 
 
+
+
+
+
+
+
+
+#計画と行動のマルチタスクモデル
 class Normalizer:
     def __init__(self, path):
-
-# inference_dtに合わせないと型例外でる
         with open(path, "rb") as f:
             stats = pickle.load(f)
-        self.obs_mean, self.obs_std = stats["obs_mean"], stats["obs_std"]
-        self.rtg_mean, self.rtg_std = stats["ret_mean"], stats["ret_std"]
-#        with open(path, "rb") as f:
-#            data = pickle.load(f)
-#        self.obs_mean = torch.tensor(data["obs_mean"], dtype=torch.float32)
-#        self.obs_std = torch.tensor(data["obs_std"], dtype=torch.float32)
-#        self.rtg_mean = torch.tensor(data.get("ret_mean", 0.0), dtype=torch.float32)
-#        self.rtg_std = torch.tensor(data.get("ret_std", 1.0), dtype=torch.float32)
+        # 必須キー
+        self.obs_mean = np.asarray(stats["obs_mean"], dtype=np.float32)
+        self.obs_std  = np.asarray(stats["obs_std"],  dtype=np.float32)
+        # RTGは ret_* / rtg_* どちらでも拾えるように
+        self.rtg_mean = np.float32(stats.get("ret_mean", stats.get("rtg_mean", 0.0)))
+        self.rtg_std  = np.float32(stats.get("ret_std",  stats.get("rtg_std",  1.0)))
+        # 追記：WPの正規化情報（無ければ単位スケール）
+        self.wp_mean  = np.asarray(stats.get("wp_mean", np.zeros(5, dtype=np.float32)), dtype=np.float32)
+        self.wp_std   = np.asarray(stats.get("wp_std",  np.ones(5,  dtype=np.float32)), dtype=np.float32)
+
+    @staticmethod
+    def normalize(x, mean, std, eps: float = 1e-6):
+        return (x - mean) / (std + eps)
 
     def normalize_obs(self, obs):
-        return (obs - self.obs_mean) / (self.obs_std + 1e-8)
+        return self.normalize(obs, self.obs_mean, self.obs_std)
 
     def normalize_rtg(self, rtg):
-        return (rtg - self.rtg_mean) / (self.rtg_std + 1e-8)
+        return self.normalize(rtg, self.rtg_mean, self.rtg_std)
+
+    def normalize_wp(self, wp):
+        return self.normalize(wp, self.wp_mean, self.wp_std)
+#
+#class Normalizer:
+#    def __init__(self, path):
+#
+#        with open(path, "rb") as f:
+#            stats = pickle.load(f)
+#        self.obs_mean, self.obs_std = stats["obs_mean"], stats["obs_std"]
+#        self.rtg_mean, self.rtg_std = stats["ret_mean"], stats["ret_std"]
+#
+##計画と行動のマルチタスクモデル 追記：WPの正規化情報（なければ単位スケール）
+#        self.wp_mean = d.get("wp_mean", np.zeros(5, dtype=np.float32))
+#        self.wp_std  = d.get("wp_std",  np.ones(5, dtype=np.float32))
+#
+##計画と行動のマルチタスクモデル
+#    def normalize(x, mean, std, eps=1e-6):
+#        return (x - mean) / (std + eps)
+#
+#    def normalize_obs(self, obs):
+#        return (obs - self.obs_mean) / (self.obs_std + 1e-8)
+#
+#    def normalize_rtg(self, rtg):
+#        return (rtg - self.rtg_mean) / (self.rtg_std + 1e-8)
 
 
 #最新モデルでリプレイする　別手法
@@ -77,9 +123,15 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
     model = DecisionTransformer(
         obs_dim=traj["observations"].shape[1],
         act_dim=traj["actions"].shape[1],
+#計画と行動のマルチタスクモデル
         context_len=context_len,
         n_layer=n_layer,
-        n_head=n_head
+        n_head=n_head,
+        plan_M=PLAN_M,
+        use_focus=False
+#       context_len=context_len,
+#        n_layer=n_layer,
+#        n_head=n_head
     ).to(DEVICE)
 
  #最新モデルでリプレイする　別手法
@@ -89,9 +141,13 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
     model.eval()
 
     # === 環境初期化 ===
-    env = GenesisEnv()
-    obs = env.reset()
 
+#計画と行動のマルチタスクモデル
+    # === 環境初期化（Gymnasium専用）===
+    env = GenesisEnv()
+    obs, _ = env.reset(seed=0)
+#    env = GenesisEnv()
+#    obs = env.reset()
 
     done = False
     total_reward = 0.0
@@ -111,6 +167,10 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
 
     print(f"✅ 目標報酬を設定: {initial_rtg[0]}")
 
+#計画と行動のマルチタスクモデル 1回だけWP正規化のmean/stdをtorch化
+    wp_mean_t = torch.tensor(norm.wp_mean, dtype=torch.float32, device=DEVICE)
+    wp_std_t  = torch.tensor(norm.wp_std,  dtype=torch.float32, device=DEVICE)
+
     for t in range(100_000):
 
         # 正規化＋テンソル化
@@ -128,13 +188,41 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
         rtg_tensor = torch.tensor(rtg_norm.copy(), dtype=torch.float32).unsqueeze(0).to(DEVICE)
         ts_tensor  = torch.tensor(ts.copy(), dtype=torch.long).unsqueeze(0).to(DEVICE)
 
+#計画と行動のマルチタスクモデル 環境からWPプレビューを取得して正規化
+        wp_np = env.scene.get_wp_preview(K_WP)                         # (K,5)
+        wp_tensor = torch.tensor(wp_np, dtype=torch.float32, device=DEVICE).unsqueeze(0)  # (1,K,5)
+        wp_tensor = (wp_tensor - wp_mean_t) / (wp_std_t + 1e-6)
+
+
+#計画と行動のマルチタスクモデル
         with torch.no_grad():
-            # DTのMLP化検証 復元step8
-            action_pred = model(ts_tensor, obs_tensor, act_tensor, rtg_tensor)
+            action_pred, plan_hat, alpha = model(
+                ts_tensor, obs_tensor, act_tensor, rtg_tensor,
+                wp=wp_tensor, return_plan=True, return_focus=False
+            )
             action = action_pred[0, -1].cpu().numpy()
 
-        # 実行
-        obs, reward, done, _ = env.step(action)
+            # 計画の可視化
+            debug_plan_xy = [0.0,0.0]
+            if plan_hat is not None:
+                # (1,2M) or (1,T,2M) の両方に対応
+                if plan_hat.dim() == 3:
+                    debug_plan_xy = plan_hat[0, -1].cpu().numpy()   # (2M,)
+                else:
+                    debug_plan_xy = plan_hat[0].cpu().numpy()       # (2M,)
+#                env.scene.debug_draw_plan_xy(debug_plan_xy)
+
+        # step: Gymnasium専用（5タプル）
+        obs, reward, terminated, truncated, info = env.step(action)
+
+
+        done = bool(terminated) | bool(truncated)
+#            
+#        with torch.no_grad():
+#           action_pred = model(ts_tensor, obs_tensor, act_tensor, rtg_tensor)
+#           action = action_pred[0, -1].cpu().numpy()
+#        # 実行
+#        obs, reward, done, _ = env.step(action)
 
         total_reward += reward
 

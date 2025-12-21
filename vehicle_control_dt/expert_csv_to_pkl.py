@@ -21,11 +21,11 @@ obs = df[["target_wp_x", "target_wp_y", "pos_x", "pos_y", "yaw_sin", "yaw_cos", 
 # act = 出力ベクトル
 act = df[["steer_angle", "throttle"]].values.astype(np.float32)
 
-# reward = heading_error の符号付き距離（任意の定義に応じて調整）
-if "reward" in df.columns:
-    rew = df["reward"].values.astype(np.float32)
-else:
-    rew = -np.abs(df["heading_error"].values).astype(np.float32)
+rew = df["reward"].values.astype(np.float32)
+
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+plan = df[["plan_x1","plan_y1", "plan_x2", "plan_y2", "plan_x3", "plan_y3"]].to_numpy(np.float32) # (T, 2M) にして保存
+
 
 # next_obs
 next_obs = np.roll(obs, -1, axis=0)
@@ -42,6 +42,8 @@ trajectory = {
     "reward": rew,
     "done": done,
     "next_obs": next_obs,
+    #計画と行動のマルチタスクモデル　教師データに計画を入れる
+    "plan": plan,
 }
 
 # save as list of one trajectory

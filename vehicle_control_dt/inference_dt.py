@@ -287,22 +287,6 @@ for t in range(100_000):
         action_pred = model(ts_tensor, obs_tensor, act_tensor, rtg_tensor)
         action = action_pred[0, -1].cpu().numpy()
 
-## DTのMLP化検証 復元step8attn
-## アテンションマップの可視化 step8attn
-#        model.eval()
-#        with torch.no_grad():
-#            action_pred = model(ts_tensor, obs_tensor, act_tensor, rtg_tensor)
-#            action = action_pred[0, -1].cpu().numpy()
-##            attn_maps = model.get_attention_maps()
-##            visualize_attention(attn_maps, layer=2, head=0)  # 任意のレイヤー・ヘッド
-
-## DTのMLP化検証 復元
-#        action_pred = model(ts_tensor, obs_tensor, act_tensor, rtg_tensor)
-#        action = action_pred[0, -1].cpu().numpy()
-
-#        # 偏り可視化
-#        print("action:", action)
-
     # 実行
     obs, reward, done, _ = env.step(action)
 

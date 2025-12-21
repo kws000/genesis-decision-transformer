@@ -5,7 +5,7 @@ import shutil
 import re
 
 #最新モデルでリプレイする　別手法
-REPLAY_MODE = True#False#True#False
+REPLAY_MODE = False#True#False
 CHECKPOINTS_DIR = "checkpoints"
 
 # ここで暫定モデル temp_model.pt がロードされる

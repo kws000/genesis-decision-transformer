@@ -49,16 +49,22 @@ context_len = 1#5
 embed_dim = 128
 # === ハイパーパラメータ ===
 
-# DTのMLP化検証
-BATCH_SIZE = 32
-EPOCHS = 100#10#2
+#計画と行動のマルチタスクモデル
+BATCH_SIZE = 64
 LR = 1e-3
-#BATCH_SIZE_org = 64 # MLPだと 32
-#EPOCHS_org = 20     # MLPだと 100
-#LR_org = 1e-4       # MLPだと 1e-3
+EPOCHS = 50
+K_WP = 40
+PLAN_M = 3
+W_ACT = 1.0
+W_PLAN = 0.5
+W_SMOOTH = 0.01
+USE_FOCUS = False
+#BATCH_SIZE = 32
+#EPOCHS = 100
+#LR = 1e-3
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pkl_path = "data_dt/trajectories_dt.pkl"
 model_path = "models/decision_transformer.pt"
 
@@ -74,20 +80,45 @@ from torch.utils.data import Dataset
 
 # 学習サンプリング方式の変更
 class SequenceDataset(Dataset):
+
+#計画と行動のマルチタスクモデル    
     def __init__(self, path, context_len):
+        # 引数名の取り違え修正（pkl_path -> path）
         with open(path, "rb") as f:
             trajectories = pickle.load(f)
-        
+#   def __init__(self, path, context_len):
+#       with open(pkl_path, "rb") as f:
+#            trajectories = pickle.load(f)
+
         self.context_len = context_len
         self.samples = []
+
+#計画と行動のマルチタスクモデル    
+        # データセット全体で固定のKを決める（バッチ結合のため）
+        target_K = None
+        for tr in trajectories:
+            wpv = tr.get("wp_preview", None)
+            if isinstance(wpv, np.ndarray):
+                if wpv.ndim == 3:      # (T,K,5)
+                    target_K = int(wpv.shape[1]); break
+                elif wpv.ndim == 2:    # (K,5)
+                    target_K = int(wpv.shape[0]); break
+        if target_K is None:
+            target_K = K_WP
+        self.k_wp = target_K
+        self.plan_dim = 2 * PLAN_M
 
         for traj in trajectories:
             obs = traj["observations"]
             act = traj["actions"]
             ret = traj["returns"]
             tms = traj["timesteps"]
-            initial_rtg = traj["initial_rtg"][0]
-#            initial_rtg = traj.get("initial_rtg",ret[0])
+
+#計画と行動のマルチタスクモデル 追加フィールド（あれば利用）
+            wpv = traj.get("wp_preview", None)   # (T,K,5) or (K,5)
+            plan = traj.get("plan", None)        # (2M,) or (T,2M)
+#           initial_rtg = traj["initial_rtg"][0]
+
 
             T = len(obs)
             if T < context_len:
@@ -95,37 +126,84 @@ class SequenceDataset(Dataset):
 
             for i in range(T - context_len):
 
-# 初期報酬を渡すように
+                # 初期報酬を渡すように
                 obs_seq = obs[i:i+context_len]
                 act_seq = act[i:i+context_len]
                 rtg_seq = ret[i:i+context_len]
                 tms_seq = tms[i:i+context_len]
 
+#計画と行動のマルチタスクモデル
+                # --- WPプレフィクス（窓の末尾に合わせる） ---
+                if isinstance(wpv, np.ndarray):
+                    if wpv.ndim == 3:      # (T,K,5)
+                        wp_k5 = wpv[i + context_len - 1]
+                    elif wpv.ndim == 2:    # (K,5)
+                        wp_k5 = wpv
+                    else:
+                        wp_k5 = np.zeros((self.k_wp, 5), dtype=np.float32)
+                else:
+                    wp_k5 = np.zeros((self.k_wp, 5), dtype=np.float32)
+                # pad/trim to K
+                if wp_k5.shape[0] < self.k_wp:
+                    pad = np.zeros((self.k_wp - wp_k5.shape[0], 5), dtype=wp_k5.dtype)
+                    wp_k5 = np.concatenate([wp_k5, pad], axis=0)
+                elif wp_k5.shape[0] > self.k_wp:
+                    wp_k5 = wp_k5[:self.k_wp]
+                # --- 計画ラベル（なければゼロで占位） ---
+                if isinstance(plan, np.ndarray):
+                    if plan.ndim == 2:      # (T, 2M)
+                        plan_vec = plan[i + context_len - 1]
+                    else:                    # (2M,)
+                        plan_vec = plan
+                    # pad/trim to 2*PLAN_M
+                    if plan_vec.shape[0] < self.plan_dim:
+                        pad = np.zeros((self.plan_dim - plan_vec.shape[0],), dtype=np.float32)
+                        plan_vec = np.concatenate([plan_vec.astype(np.float32), pad], axis=0)
+                    elif plan_vec.shape[0] > self.plan_dim:
+                        plan_vec = plan_vec[:self.plan_dim].astype(np.float32)
+                else:
+                    plan_vec = np.zeros((self.plan_dim,), dtype=np.float32)
                 self.samples.append({
-                    "states": obs_seq,
-                    "actions": act_seq,
-                    "returns": rtg_seq,
+                    "states":    obs_seq,
+                    "actions":   act_seq,
+                    "returns":   rtg_seq,
                     "timesteps": tms_seq,
+                    "wp":        wp_k5,      # (K,5)
+                    "plan":      plan_vec,   # (2*PLAN_M,)
                 })
+#               self.samples.append({
+#                   "states": obs_seq,
+#                   "actions": act_seq,
+#                   "returns": rtg_seq,
+#                   "timesteps": tms_seq,
+#               })
 
-#                self.samples.append({
-#                    "states": obs[i:i+context_len],
-#                    "actions": act[i:i+context_len],
-#                    "returns": ret[i:i+context_len],
-#                    "timesteps": tms[i:i+context_len],
-#                })
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+#計画と行動のマルチタスクモデル
+        rets = sample["returns"]
+        if rets.ndim == 1:
+            rets = rets[:, None]  # (T,) -> (T,1)
         return (
-            torch.tensor(sample["states"], dtype=torch.float32),       # (context_len, obs_dim)
-            torch.tensor(sample["actions"], dtype=torch.float32),      # (context_len, act_dim)
-            torch.tensor(sample["returns"], dtype=torch.float32),      # (context_len, 1)
-            torch.tensor(sample["timesteps"], dtype=torch.long),       # (context_len,)
+            torch.tensor(sample["states"],    dtype=torch.float32),  # (T, obs_dim)
+            torch.tensor(sample["actions"],   dtype=torch.float32),  # (T, act_dim)
+            torch.tensor(rets,                dtype=torch.float32),  # (T, 1)
+            torch.tensor(sample["timesteps"], dtype=torch.long),     # (T,)
+            torch.tensor(sample["wp"],        dtype=torch.float32),  # (K, 5)
+            torch.tensor(sample["plan"],      dtype=torch.float32),  # (2*PLAN_M,)
         )
+#       return (
+#           torch.tensor(sample["states"], dtype=torch.float32),       # (context_len, obs_dim)
+#           torch.tensor(sample["actions"], dtype=torch.float32),      # (context_len, act_dim)
+#           torch.tensor(sample["returns"], dtype=torch.float32),      # (context_len, 1)
+#           torch.tensor(sample["timesteps"], dtype=torch.long),       # (context_len,)
+#       )
+
+
 
 class TrajectoryDataset(Dataset):
     def __init__(self, path, context_len):
@@ -215,26 +293,24 @@ class TrajectoryDataset(Dataset):
             torch.tensor(t, dtype=torch.long),      # timesteps
         )
 
-# DTのMLP化検証 復元step8attn
-def visualize_attention(attn_weights, title="Attention Map", layer=0, head=0):
-    # attn_weights: list of [B, n_head, T, T]
-    attn = attn_weights[layer][0, head]  # shape: (T, T)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(attn.cpu().numpy(), cmap="viridis")
-    plt.title(f"{title} - Layer {layer}, Head {head}")
-    plt.xlabel("Key Token")
-    plt.ylabel("Query Token")
-    plt.show()
 
 
 # --- 学習ループ ---
-def train():
 
-# 学習サンプリング方式の変更
+#計画と行動のマルチタスクモデル
+def _zscore_nonneg(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    mu = x.mean()
+    sd = x.std(unbiased=False) + eps
+    z = (x - mu) / sd
+    return torch.clamp(z, min=0.0)
+
+
+#計画と行動のマルチタスクモデル
+def train(pkl_path, context_len, embed_dim=128, n_layer=2, n_head=4, model_path=None):
+#def train():
+
     dataset = SequenceDataset(pkl_path, context_len)
-#    dataset = TrajectoryDataset(pkl_path, context_len)
 
-    # DTはシャッフルが必須
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 
@@ -246,70 +322,119 @@ def train():
         print(f"  timesteps.shape = {timesteps.shape}")
         break  # 一旦1バッチだけ確認
 
+#計画と行動のマルチタスクモデル
+    sample = dataset[0]
+    states0, actions0, _, _, wp0, plan0 = sample
+    obs_dim = states0.shape[-1]
+    act_dim = actions0.shape[-1]
+#   obs_dim = dataset[0][0].shape[-1]
+#   act_dim = dataset[0][1].shape[-1]
 
-    obs_dim = dataset[0][0].shape[-1]
-    act_dim = dataset[0][1].shape[-1]
+
 
 ## DTのMLP化検証
-#    model = DecisionTransformer(obs_dim, act_dim).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim).to(DEVICE)
 
 ## DTのMLP化検証 復元step1
-#    model = DecisionTransformer(obs_dim, act_dim).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim).to(DEVICE)
 
 ## DTのMLP化検証 復元step2
-#    model = DecisionTransformer(obs_dim, act_dim).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim).to(DEVICE)
 
 ## DTのMLP化検証 復元step3
-#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(DEVICE)
 
 ## DTのMLP化検証 復元step4
-#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(DEVICE)
 
 ## DTのMLP化検証 復元step5
-#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(DEVICE)
 
 ## DTのMLP化検証 復元step6
-#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len).to(DEVICE)
 
 ## DTのMLP化検証 復元step7
-#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len, embed_dim=embed_dim).to(device)
+#    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len, embed_dim=embed_dim).to(DEVICE)
 
-# DTのMLP化検証 復元step8
-    model = DecisionTransformer(obs_dim, act_dim,context_len=context_len, embed_dim=embed_dim).to(device)
-
-## DTのMLP化検証 復元
-#    model = DecisionTransformer(obs_dim, act_dim, context_len=context_len, embed_dim=embed_dim).to(device)
-
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
+#計画と行動のマルチタスクモデル
+    model = DecisionTransformer(obs_dim, act_dim,
+                                context_len=context_len,
+                                embed_dim=embed_dim,
+                                n_layer=n_layer,
+                                n_head=n_head,
+                                plan_M=PLAN_M,
+                                use_focus=USE_FOCUS).to(DEVICE)
+    if model_path and os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
         print(f"✅ モデルの重みを読み込みました: {model_path}")
     else:
-        print(f"⚠️ モデルが存在しないため、新規で学習を開始します")
+       print(f"⚠️ モデルが存在しないため、新規で学習を開始します")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-    loss_fn = nn.MSELoss()
+    mse = nn.MSELoss()
+#   model = DecisionTransformer(obs_dim, act_dim,context_len=context_len, embed_dim=embed_dim).to(DEVICE)
+#
+#   if os.path.exists(model_path):
+#       model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+#       print(f"✅ モデルの重みを読み込みました: {model_path}")
+#   else:
+#       print(f"⚠️ モデルが存在しないため、新規で学習を開始します")
+#
+#   optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+#   loss_fn = nn.MSELoss()
 
     print("Start training...")
 
+#計画と行動のマルチタスクモデル
     for epoch in range(EPOCHS):
         total_loss = 0
-        for states, actions, returns,timesteps in dataloader:
-            timesteps = timesteps.to(device)
-            states = states.to(device)
-            actions = actions.to(device)
-            returns = returns.to(device)
-
-            pred_actions = model(timesteps, states, actions, returns)
-            loss = loss_fn(pred_actions, actions)
-
+        for states, actions, returns, timesteps, wp, plan in dataloader:
+            timesteps = timesteps.to(DEVICE).long()
+            states    = states.to(DEVICE).float()
+            actions   = actions.to(DEVICE).float()
+            returns   = returns.to(DEVICE).float()
+            wp        = wp.to(DEVICE).float()
+            pred_actions, pred_plan, alpha = model(timesteps, states, actions, returns,
+                                                    wp=wp, return_plan=True, return_focus=USE_FOCUS)
+            # 行動損失（RTG重み付きBC）
+            w = _zscore_nonneg(returns)  # (B,T,1)
+            w = w.expand_as(actions)     # (B,T,2)
+            L_act = (w * (pred_actions - actions) ** 2).mean()
+            # 計画損失
+            plan = plan.to(DEVICE).float()  # (B,2M)
+            L_plan = mse(pred_plan, plan)
+            # 滑らかさ損失（Δa）
+            if pred_actions.shape[1] > 1:
+                da = pred_actions[:, 1:, :] - pred_actions[:, :-1, :]
+                L_smooth = (da ** 2).mean()
+            else:
+                L_smooth = torch.zeros((), device=DEVICE)
+            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
-            total_loss += loss.item()
-
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1} - Loss: {avg_loss:.5f}")
+            total_loss += float(loss.item())
+            avg_loss = total_loss / max(1, len(dataloader))
+            print(f"Epoch {epoch+1:03d} | L={avg_loss:.5f} | L_act={L_act.item():.4f} | L_plan={L_plan.item():.4f} | L_sm={L_smooth.item():.4f}")
+#   for epoch in range(EPOCHS):
+#       total_loss = 0
+#       for states, actions, returns,timesteps in dataloader:
+#           timesteps = timesteps.to(DEVICE)
+#           states = states.to(DEVICE)
+#           actions = actions.to(DEVICE)
+#           returns = returns.to(DEVICE)
+#
+#           pred_actions = model(timesteps, states, actions, returns)
+#           loss = loss_fn(pred_actions, actions)
+#
+#           optimizer.zero_grad()
+#           loss.backward()
+#           optimizer.step()
+#
+#           total_loss += loss.item()
+#
+#       avg_loss = total_loss / len(dataloader)
+#       print(f"Epoch {epoch+1} - Loss: {avg_loss:.5f}")
 
     # 保存
     os.makedirs("models", exist_ok=True)
@@ -318,4 +443,5 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    train(pkl_path, context_len,)
+    

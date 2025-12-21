@@ -2,6 +2,7 @@ import pickle
 import numpy as np
 import os
 
+
 # パス設定
 input_path = "trajectories/trajectory_data.pkl"
 output_path = "data_dt/trajectories_dt.pkl"
@@ -9,7 +10,6 @@ norm_path = "data_dt/mean_std.pkl"
 os.makedirs("trajectories", exist_ok=True)
 os.makedirs("data_dt", exist_ok=True)
 
-# パラメータ
 TIMESTEP_MAX = 4000
 
 # データ読み込み
@@ -17,7 +17,11 @@ with open(input_path, "rb") as f:
     raw_trajectories = pickle.load(f)
 
 # 軌跡ごとのデータ抽出
-observations, actions, returns = [], [], []
+
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+observations, actions, returns, plans = [], [], [], []
+plan_dim = None
+#observations, actions, returns = [], [], []
 
 
 print("type of raw_trajectories:", type(raw_trajectories))
@@ -31,25 +35,25 @@ for traj in raw_trajectories:
     act = traj["action"]
     rew = traj["reward"]
 
+    #計画と行動のマルチタスクモデル　教師データに計画を入れる
+    plan = traj.get("plan", None)   # (T, 2M) or None
 
     print("type:", type(traj["action"]))
     print("len:", len(traj["action"]))
     print("element 0:", traj["action"][0])
     print("element 0 shape:", np.shape(traj["action"][0]))
 
-
-
     # 報酬がスカラーならリストに
-
-# 警告抑制
     if isinstance(rew, (float, np.floating)):
         rew = [rew]
-#    if isinstance(rew, (float, np.float32, np.float64)):
-#        rew = [rew]
 
-    # RTG 計算
+    #計画と行動のマルチタスクモデル　教師データに計画を入れる    
+    rew = np.asarray(rew, dtype=np.float32).reshape(-1)
+
+    # RTG 計算（割引なしの累積）
     discounted_return = []
     ret = 0
+
     for r in reversed(rew):
         ret += r
         discounted_return.insert(0, ret)
@@ -64,22 +68,40 @@ for traj in raw_trajectories:
     if act.ndim == 1:
         act = act.reshape(-1, 1)
 
-    discounted_return = np.array(discounted_return)
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+    discounted_return = np.array(discounted_return, dtype=np.float32)
     if discounted_return.ndim == 1:
         discounted_return = discounted_return.reshape(-1, 1)
+#    discounted_return = np.array(discounted_return)
+#    if discounted_return.ndim == 1:
+#        discounted_return = discounted_return.reshape(-1, 1)
+#    discounted_return_last = discounted_return
 
-    discounted_return_last = discounted_return
-
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
     observations.append(obs)
-    
     actions.append(act)
     returns.append(discounted_return)
+    if plan is not None:
+        plan = np.asarray(plan, dtype=np.float32)
+        if plan.ndim == 1:
+            plan = plan.reshape(-1, 1)
+        if plan_dim is None:
+            plan_dim = plan.shape[1]
+        plans.append(plan)
+#    observations.append(obs)
+#    actions.append(act)
+#    returns.append(discounted_return)
+
+
 
     print("action sample shape:", actions[0].shape)
 
 # 正規化用統合
 all_obs = np.concatenate(observations, axis=0)
 all_returns = np.concatenate(returns, axis=0)
+
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+all_plan = np.concatenate(plans, axis=0)
 
 # === 統計量の更新 or 読み込み ===
 if os.path.exists(norm_path):
@@ -108,38 +130,75 @@ obs_std = np.maximum(obs_std_prev, obs_std_new)
 ret_mean = all_returns.mean(axis=0)
 ret_std = all_returns.std(axis=0) + 1e-6
 
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+plan_mean = all_plan.mean(axis=0)
+plan_std  = all_plan.std(axis=0) + 1e-6
+
+
 # 保存用リスト
+
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
 dt_trajectories = []
-for obs, act, ret in zip(observations, actions, returns):
+for i in range(len(observations)):
+    obs = observations[i]; act = actions[i]; ret = returns[i]
     obs_norm = (obs - obs_mean) / obs_std
     ret_norm = (ret - ret_mean) / ret_std
-    timesteps = np.arange(len(obs), dtype=np.int64).reshape(-1)
-
-    # TIMESTEP_MAX 以上はまずい
-    timesteps = timesteps % TIMESTEP_MAX
-
-    dt_trajectories.append({
-        "observations": obs_norm,
-        "actions": act,
-        "returns": ret_norm,
-        "timesteps": timesteps,
-        "initial_rtg": discounted_return_last,  # ←追加        
-    })
+    timesteps = np.arange(len(obs), dtype=np.int64) % TIMESTEP_MAX
+    item = {
+        "observations": obs_norm,   # 学習は正規化済みobsをそのまま使用
+        "actions":      act,
+        "returns":      ret_norm,   # 正規化RTG（トークン & 重み付けの基準）
+        "timesteps":    timesteps,
+        "initial_rtg":  ret[:1].copy(),  # 先頭RTGを (1,1) で保存
+    }
+    if len(plans) > 0:
+        item["plan"] = plans[i]     # (T, 2M)
+    dt_trajectories.append(item)
+#dt_trajectories = []
+#for obs, act, ret in zip(observations, actions, returns):
+#    obs_norm = (obs - obs_mean) / obs_std
+#    ret_norm = (ret - ret_mean) / ret_std
+#    timesteps = np.arange(len(obs), dtype=np.int64).reshape(-1)
+#
+#    # TIMESTEP_MAX 以上はまずい
+#    timesteps = timesteps % TIMESTEP_MAX
+#
+#    dt_trajectories.append({
+#        "observations": obs_norm,
+#        "actions": act,
+#        "returns": ret_norm,
+#        "timesteps": timesteps,
+#        "initial_rtg": discounted_return_last,  # ←追加        
+#    })
 
 print("✅ 変換されたエピソード数:", len(dt_trajectories))
 
 # --- 保存 ---
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
 with open(output_path, "wb") as f:
     pickle.dump(dt_trajectories, f)
 
 with open(norm_path, "wb") as f:
-    pickle.dump({
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+    out_stats = {        
         "obs_mean": obs_mean,
         "obs_std": obs_std,
         "ret_mean": ret_mean,
         "ret_std": ret_std,
         "count": count_prev + count_new,
-    }, f)
+    }
+    if all_plan is not None:
+        out_stats["plan_mean"] = plan_mean
+        out_stats["plan_std"]  = plan_std
+    pickle.dump(out_stats, f)
+#    pickle.dump({
+#        "obs_mean": obs_mean,
+#        "obs_std": obs_std,
+#        "ret_mean": ret_mean,
+#        "ret_std": ret_std,
+#        "count": count_prev + count_new,
+#    }, f)
+
 
 print("✅ DTフォーマット変換および統計保存が完了しました")

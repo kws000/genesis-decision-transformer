@@ -5,6 +5,10 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+#計画と行動のマルチタスクモデル
+import torch.nn.functional as F
+from typing import Optional, Tuple, List
+
 # パラメータ
 TIMESTEP_MAX = 4000
 
@@ -368,9 +372,9 @@ class DecisionTransformer_Step7(nn.Module):
 
         return self.predict_action(x)  # → (B, T, act_dim)
 
+
 # DTのMLP化検証 復元step8
-class DecisionTransformer(nn.Module):
-#class DecisionTransformer_Step8(nn.Module):
+class DecisionTransformer_Step8(nn.Module):
     def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4):#段階的拡張の開始設定
 #    def __init__(self, obs_dim, act_dim, context_len=5, embed_dim=128, n_layer=3, n_head=4):
         super().__init__()
@@ -424,9 +428,155 @@ class DecisionTransformer(nn.Module):
 
 
 #最新アテンションマップ対応(step8ベース)
-class DecisionTransformer_Step8_NewAttn(nn.Module):
-#class DecisionTransformer(nn.Module):
-    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
+#動作は問題ないがモンキーパッチによる可視化方法が悪く、エラー扱いが邪魔なので封印しておく
+#class DecisionTransformer_Step8_NewAttn(nn.Module):
+#    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
+#        super().__init__()
+#        self.obs_dim = obs_dim
+#        self.act_dim = act_dim
+#        self.context_len = context_len
+#        self.embed_dim = embed_dim
+#        self.n_head = n_head
+#
+#        self.embed_timestep = nn.Embedding(timestep_max, embed_dim)
+#        self.embed_return   = nn.Linear(1, embed_dim)
+#        self.embed_state    = nn.Linear(obs_dim, embed_dim)
+#        self.embed_action   = nn.Linear(act_dim, embed_dim)
+#        self.dropout        = nn.Dropout(0.1)
+#
+#        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head, batch_first=False)
+#        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layer)
+#
+#        self.predict_action = nn.Sequential(nn.Linear(embed_dim, act_dim))
+#
+#        # ---- attention capture (monkey-patch方式) ----
+#        self._attn_weights = []          # list of (B, heads, Lq, Lk)
+#        self._attn_patches = []          # list of (attn_module, orig_forward)
+#        self._self_attn_layers = [self.transformer.layers[i].self_attn for i in range(n_layer)]
+#
+#    # ★★ これだけを使う：重みを必ず返すよう forward をラップ
+#    def enable_attention_hook(self, enabled: bool = True):
+#        # 既存パッチ解除
+#        for attn, orig_fwd in self._attn_patches:
+#            attn.forward = orig_fwd
+#        self._attn_patches.clear()
+#        self._attn_weights.clear()
+#
+#        if not enabled:
+#            return
+#
+#        def make_wrapped(attn_mod):
+#            orig_forward = attn_mod.forward
+#            def wrapped_forward(query, key, value, **kwargs):
+#                kwargs["need_weights"] = True
+#                kwargs["average_attn_weights"] = False  # ヘッド別
+#                out, w = orig_forward(query, key, value, **kwargs)
+#                # 形状統一
+#                if w is not None:
+#                    if w.dim() == 2:      # (Lq, Lk)
+#                        w = w.unsqueeze(0).unsqueeze(0)          # (1,1,Lq,Lk)
+#                    elif w.dim() == 3:    # (B, Lq, Lk)
+#                        w = w.unsqueeze(1)                        # (B,1,Lq,Lk)
+#                    self._attn_weights.append(w.detach().cpu())
+#                return out, w
+#            return orig_forward, wrapped_forward
+#
+#        for attn in self._self_attn_layers:
+#            orig_fwd, wrapped_fwd = make_wrapped(attn)
+#            self._attn_patches.append((attn, orig_fwd))
+#            attn.forward = wrapped_fwd
+#            setattr(attn, "_patched", True)  # ← デバッグ用フラグ
+#
+#    def disable_attention_hook(self):
+#        for attn, orig_fwd in self._attn_patches:
+#            attn.forward = orig_fwd
+#        self._attn_patches.clear()
+#
+#    def get_collected_attn(self):
+#        return self._attn_weights
+#
+#    def forward(self, timesteps, states, actions, returns_to_go):
+#        B, T = states.shape[0], states.shape[1]
+#        if timesteps.ndim == 3:
+#            timesteps = timesteps.squeeze(-1)
+#
+#        time_emb   = self.embed_timestep(timesteps)
+#        state_emb  = self.embed_state(states) + time_emb
+#        action_emb = self.embed_action(actions) + time_emb
+#        return_emb = self.embed_return(returns_to_go) + time_emb
+#
+#        stacked = torch.stack((state_emb, action_emb, return_emb), dim=2)  # (B,T,3,D)
+#        x = stacked.view(B, -1, self.embed_dim)                            # (B,3T,D)
+#
+#        x = self.dropout(x)
+#        x = x.permute(1, 0, 2)        # (3T,B,D)
+#        x = self.transformer(x)       # ← ここで各層の self_attn がラップされ、重みを収集
+#        x = x.permute(1, 0, 2)        # (B,3T,D)
+#
+#        x = x[:, 0::3]                # stateトークンのみ
+#        return self.predict_action(x)
+#
+#    # DecisionTransformer クラスの中に追記（@torch.no_grad は任意）
+#    @torch.no_grad()
+#    def get_qkv_weights(self):
+#        """
+#        各層の Q/K/V/O の重みを返す。
+#        返り値: list[ { "W_q","b_q","W_k","b_k","W_v","b_v","W_o","b_o" } ] 
+#        すべて torch.Tensor（biasは None の事もあり）。
+#        """
+#        mats = []
+#        for layer in self.transformer.layers:
+#            attn = layer.self_attn
+#
+#            # PyTorchの実装差異に配慮（通常は in_proj_weight がある）
+#            if getattr(attn, "in_proj_weight", None) is not None:
+#                # in_proj_weight = [W_q; W_k; W_v] 連結 (3D, D)
+#                W_in = attn.in_proj_weight.detach()
+#                b_in = attn.in_proj_bias.detach() if attn.in_proj_bias is not None else None
+#                W_q, W_k, W_v = torch.split(W_in, self.embed_dim, dim=0)
+#                if b_in is not None:
+#                    b_q, b_k, b_v = torch.split(b_in, self.embed_dim, dim=0)
+#                else:
+#                    b_q = b_k = b_v = None
+#            else:
+#                # まれに分離プロジェクションのケース（保険）
+#                W_q = getattr(attn, "q_proj_weight").detach()
+#                W_k = getattr(attn, "k_proj_weight").detach()
+#                W_v = getattr(attn, "v_proj_weight").detach()
+#                b_q = getattr(attn, "q_proj_bias", None)
+#                b_k = getattr(attn, "k_proj_bias", None)
+#                b_v = getattr(attn, "v_proj_bias", None)
+#                if b_q is not None: b_q = b_q.detach()
+#                if b_k is not None: b_k = b_k.detach()
+#                if b_v is not None: b_v = b_v.detach()
+#
+#            W_o = attn.out_proj.weight.detach()
+#            b_o = attn.out_proj.bias.detach() if attn.out_proj.bias is not None else None
+#
+#            mats.append({
+#                "W_q": W_q, "b_q": b_q,
+#                "W_k": W_k, "b_k": b_k,
+#                "W_v": W_v, "b_v": b_v,
+#                "W_o": W_o, "b_o": b_o
+#            })
+#        return mats
+#
+#    @torch.no_grad()
+#    def get_state_embed_weight(self):
+#        """観測ベクトル → 埋め込み への線形層の重み (D, obs_dim) を返す"""
+#        return self.embed_state.weight.detach()
+
+
+
+
+#計画と行動のマルチタスクモデル
+#class DecisionTransformer_Step9(nn.Module):
+class DecisionTransformer(nn.Module):
+
+    #※ timestep_vocab は TIMESTEP_MAX 以上の2の乗数で
+    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, wp_dim: int = 5):
+#   def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
+  
         super().__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
@@ -434,83 +584,221 @@ class DecisionTransformer_Step8_NewAttn(nn.Module):
         self.embed_dim = embed_dim
         self.n_head = n_head
 
-        self.embed_timestep = nn.Embedding(timestep_max, embed_dim)
+        #計画と行動のマルチタスクモデル
+        self.plan_M = plan_M
+        self.use_focus = use_focus
+        self.wp_dim = wp_dim
+
+
+#計画と行動のマルチタスクモデル
+        self.embed_timestep = nn.Embedding(timestep_vocab, embed_dim)
+#        self.embed_timestep = nn.Embedding(timestep_max, embed_dim)
+        
         self.embed_return   = nn.Linear(1, embed_dim)
         self.embed_state    = nn.Linear(obs_dim, embed_dim)
         self.embed_action   = nn.Linear(act_dim, embed_dim)
+
+#計画と行動のマルチタスクモデル WPプレフィクス用の埋め込み（dx,dy,s,κ,width）
+        self.embed_wp = nn.Linear(wp_dim, embed_dim)
+
         self.dropout        = nn.Dropout(0.1)
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head, batch_first=False)
+
+#計画と行動のマルチタスクモデル
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head, batch_first=True)
+#       encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head, batch_first=False)
+ 
+
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layer)
 
-        self.predict_action = nn.Sequential(nn.Linear(embed_dim, act_dim))
 
-        # ---- attention capture (monkey-patch方式) ----
-        self._attn_weights = []          # list of (B, heads, Lq, Lk)
-        self._attn_patches = []          # list of (attn_module, orig_forward)
-        self._self_attn_layers = [self.transformer.layers[i].self_attn for i in range(n_layer)]
+#計画と行動のマルチタスクモデル
+        self.predict_action = nn.Linear(embed_dim, act_dim)
+        # 参照ライン（計画）ヘッド：WPプレフィクスのプール表現から2M次元を出力
+        self.predict_plan = nn.Linear(embed_dim, 2 * plan_M)
+        # （任意）フォーカスヘッド：各WPトークンに重み
+        if use_focus:
+            self.focus_head = nn.Linear(embed_dim, 1)
+        else:
+            self.focus_head = None
+#       self.predict_action = nn.Sequential(nn.Linear(embed_dim, act_dim))
+
+
+#計画と行動のマルチタスクモデル
+        # ---- attention capture (hook方式) ----
+        self._attn_weights: List[torch.Tensor] = []     # list of (B, heads, L, L)
+        self._attn_handles: List[torch.utils.hooks.RemovableHandle] = []
+#        # ---- attention capture (monkey-patch方式) ----
+#        self._attn_weights = []          # list of (B, heads, Lq, Lk)
+#        self._attn_patches = []          # list of (attn_module, orig_forward)
+#        self._self_attn_layers = [self.transformer.layers[i].self_attn for i in range(n_layer)]
+
+    #計画と行動のマルチタスクモデル
+    @staticmethod
+    def _build_prefix_causal_mask(K: int, T3: int, device) -> torch.Tensor:
+        """
+        K: WPトークン数, T3: 時系列トークン総数（state,action,rtgの3T）
+        マスク仕様：
+          - WP（先頭K）は全てにフルアクセス（双方向）
+          - 時系列は因果（未来を見ない）
+          - 時系列→WP は見える（WPはプロンプト）
+        """
+        L = K + T3
+        mask = torch.zeros((L, L), device=device)  # 0=許可, -inf=禁止
+        if T3 > 0:
+            tri = torch.triu(torch.full((T3, T3), float('-inf'), device=device), diagonal=1)
+            mask[K:, K:] = tri  # 時系列は因果
+            # 時系列→WP は許可（既に0）
+        # WP行（先頭K）は全許可（既に0）
+        return mask
+
 
     # ★★ これだけを使う：重みを必ず返すよう forward をラップ
     def enable_attention_hook(self, enabled: bool = True):
-        # 既存パッチ解除
-        for attn, orig_fwd in self._attn_patches:
-            attn.forward = orig_fwd
-        self._attn_patches.clear()
-        self._attn_weights.clear()
 
+#計画と行動のマルチタスクモデル
+        # 既存hook解除
+        self.disable_attention_hook()
+        self._attn_weights.clear()
         if not enabled:
             return
-
-        def make_wrapped(attn_mod):
-            orig_forward = attn_mod.forward
-            def wrapped_forward(query, key, value, **kwargs):
-                kwargs["need_weights"] = True
-                kwargs["average_attn_weights"] = False  # ヘッド別
-                out, w = orig_forward(query, key, value, **kwargs)
-                # 形状統一
+        # 各EncoderLayerの MultiheadAttention に pre/post hook を登録
+        def pre_hook(module, args, kwargs):
+            kw = dict(kwargs) if kwargs is not None else {}
+            kw["need_weights"] = True
+            kw["average_attn_weights"] = False
+            return args, kw
+        def post_hook(module, inputs, outputs):
+            # outputs=(attn_output, attn_weights)
+            if isinstance(outputs, tuple) and len(outputs) == 2:
+                w = outputs[1]
                 if w is not None:
-                    if w.dim() == 2:      # (Lq, Lk)
-                        w = w.unsqueeze(0).unsqueeze(0)          # (1,1,Lq,Lk)
-                    elif w.dim() == 3:    # (B, Lq, Lk)
-                        w = w.unsqueeze(1)                        # (B,1,Lq,Lk)
+                    # 形状統一: (B, heads, L, L)
+                    if w.dim() == 2:
+                        w = w.unsqueeze(0).unsqueeze(0)
+                    elif w.dim() == 3:
+                        w = w.unsqueeze(1)
                     self._attn_weights.append(w.detach().cpu())
-                return out, w
-            return orig_forward, wrapped_forward
-
-        for attn in self._self_attn_layers:
-            orig_fwd, wrapped_fwd = make_wrapped(attn)
-            self._attn_patches.append((attn, orig_fwd))
-            attn.forward = wrapped_fwd
-            setattr(attn, "_patched", True)  # ← デバッグ用フラグ
+        for layer in getattr(self.transformer, "layers", []):
+            attn = getattr(layer, "self_attn", None)
+            if isinstance(attn, nn.MultiheadAttention):
+                self._attn_handles.append(attn.register_forward_pre_hook(pre_hook))
+                self._attn_handles.append(attn.register_forward_hook(post_hook))
+#        # 既存パッチ解除
+#        for attn, orig_fwd in self._attn_patches:
+#            attn.forward = orig_fwd
+#        self._attn_patches.clear()
+#        self._attn_weights.clear()
+#
+#        if not enabled:
+#            return
+#        def make_wrapped(attn_mod):
+#            orig_forward = attn_mod.forward
+#            def wrapped_forward(query, key, value, **kwargs):
+#                kwargs["need_weights"] = True
+#                kwargs["average_attn_weights"] = False  # ヘッド別
+#                out, w = orig_forward(query, key, value, **kwargs)
+#                # 形状統一
+#                if w is not None:
+#                    if w.dim() == 2:      # (Lq, Lk)
+#                        w = w.unsqueeze(0).unsqueeze(0)          # (1,1,Lq,Lk)
+#                    elif w.dim() == 3:    # (B, Lq, Lk)
+#                        w = w.unsqueeze(1)                        # (B,1,Lq,Lk)
+#                    self._attn_weights.append(w.detach().cpu())
+#                return out, w
+#            return orig_forward, wrapped_forward
+#
+#        for attn in self._self_attn_layers:
+#            orig_fwd, wrapped_fwd = make_wrapped(attn)
+#            self._attn_patches.append((attn, orig_fwd))
+#            attn.forward = wrapped_fwd
+#            setattr(attn, "_patched", True)  # ← デバッグ用フラグ
 
     def disable_attention_hook(self):
-        for attn, orig_fwd in self._attn_patches:
-            attn.forward = orig_fwd
-        self._attn_patches.clear()
+#計画と行動のマルチタスクモデル
+        for h in self._attn_handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._attn_handles.clear()
+#        for attn, orig_fwd in self._attn_patches:
+#            attn.forward = orig_fwd
+#        self._attn_patches.clear()
 
     def get_collected_attn(self):
         return self._attn_weights
 
-    def forward(self, timesteps, states, actions, returns_to_go):
-        B, T = states.shape[0], states.shape[1]
+#計画と行動のマルチタスクモデル
+    def forward(self, timesteps, states, actions, returns,
+                    wp: Optional[torch.Tensor] = None,
+                    return_plan: bool = True,
+                    return_focus: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+#   def forward(self, timesteps, states, actions, returns_to_go):
+
+#計画と行動のマルチタスクモデル
+        B, T, _ = states.shape
+#       B, T = states.shape[0], states.shape[1]
+
         if timesteps.ndim == 3:
             timesteps = timesteps.squeeze(-1)
 
         time_emb   = self.embed_timestep(timesteps)
-        state_emb  = self.embed_state(states) + time_emb
-        action_emb = self.embed_action(actions) + time_emb
-        return_emb = self.embed_return(returns_to_go) + time_emb
 
-        stacked = torch.stack((state_emb, action_emb, return_emb), dim=2)  # (B,T,3,D)
-        x = stacked.view(B, -1, self.embed_dim)                            # (B,3T,D)
+#計画と行動のマルチタスクモデル
+        s_tok = self.embed_state(states) + time_emb
+        a_tok = self.embed_action(actions) + time_emb
+        r_tok = self.embed_return(returns) + time_emb
+#       state_emb  = self.embed_state(states) + time_emb
+#       action_emb = self.embed_action(actions) + time_emb
+#       return_emb = self.embed_return(returns_to_go) + time_emb
 
-        x = self.dropout(x)
-        x = x.permute(1, 0, 2)        # (3T,B,D)
-        x = self.transformer(x)       # ← ここで各層の self_attn がラップされ、重みを収集
-        x = x.permute(1, 0, 2)        # (B,3T,D)
+#計画と行動のマルチタスクモデル
+        x_time = torch.stack([s_tok, a_tok, r_tok], dim=2).reshape(B, 3*T, self.embed_dim)
+        # WPプレフィクス（無ければ長さ0）
+        if wp is not None and wp.numel() > 0:
+            x_wp = self.embed_wp(wp)  # (B, K, D)
+            K = x_wp.shape[1]
+            x = torch.cat([x_wp, x_time], dim=1)  # (B, K+3T, D)
+        else:
+            x = x_time
+            K = 0
+        # hook使用時：前回の記録をクリア
+        if self._attn_handles:
+            self._attn_weights.clear()
+        attn_mask = self._build_prefix_causal_mask(K, x.shape[1]-K, x.device)
 
-        x = x[:, 0::3]                # stateトークンのみ
-        return self.predict_action(x)
+        h = self.transformer(x, mask=attn_mask)  # (B, L, D)
+
+        # アクションは各tの"actionトークン位置"に対応
+        # 位置: [wp:0..K-1] + [state,action,rtg]xT ⇒ action位置は K + (1 + 3*t)
+        action_positions = K + (1 + 3*torch.arange(T, device=states.device))
+        h_act = h[:, action_positions, :]  # (B, T, D)
+        pred_actions = self.predict_action(h_act)  # (B, T, A)
+        pred_plan = None
+        alpha = None
+        if return_plan:
+            # WPプレフィクスを平均プーリング（K=0なら時系列先頭を代用）
+            if K > 0:
+                h_wp = h[:, :K, :]  # (B, K, D)
+                pooled = h_wp.mean(dim=1)  # (B, D)
+                pred_plan = self.predict_plan(pooled)  # (B, 2M)
+                if return_focus and self.focus_head is not None:
+                    alpha_logits = self.focus_head(h_wp).squeeze(-1)  # (B, K)
+                    alpha = F.softmax(alpha_logits, dim=-1)
+            else:
+                pooled = h[:, 0, :]
+                pred_plan = self.predict_plan(pooled)
+        return pred_actions, pred_plan, alpha
+#       stacked = torch.stack((state_emb, action_emb, return_emb), dim=2)  # (B,T,3,D)
+#       x = stacked.view(B, -1, self.embed_dim)                            # (B,3T,D)
+#       x = self.dropout(x)
+#       x = x.permute(1, 0, 2)        # (3T,B,D)
+#       x = self.transformer(x)       # ← ここで各層の self_attn がラップされ、重みを収集
+#       x = x.permute(1, 0, 2)        # (B,3T,D)
+#
+#       x = x[:, 0::3]                # stateトークンのみ
+#       return self.predict_action(x)
 
     # DecisionTransformer クラスの中に追記（@torch.no_grad は任意）
     @torch.no_grad()
@@ -521,8 +809,13 @@ class DecisionTransformer_Step8_NewAttn(nn.Module):
         すべて torch.Tensor（biasは None の事もあり）。
         """
         mats = []
+#計画と行動のマルチタスクモデル
         for layer in self.transformer.layers:
             attn = layer.self_attn
+            if not isinstance(attn, nn.MultiheadAttention):
+                continue
+#        for layer in self.transformer.layers:
+#            attn = layer.self_attn
 
             # PyTorchの実装差異に配慮（通常は in_proj_weight がある）
             if getattr(attn, "in_proj_weight", None) is not None:
@@ -536,12 +829,19 @@ class DecisionTransformer_Step8_NewAttn(nn.Module):
                     b_q = b_k = b_v = None
             else:
                 # まれに分離プロジェクションのケース（保険）
+#計画と行動のマルチタスクモデル
                 W_q = getattr(attn, "q_proj_weight").detach()
                 W_k = getattr(attn, "k_proj_weight").detach()
                 W_v = getattr(attn, "v_proj_weight").detach()
                 b_q = getattr(attn, "q_proj_bias", None)
                 b_k = getattr(attn, "k_proj_bias", None)
                 b_v = getattr(attn, "v_proj_bias", None)
+#                W_q = getattr(attn, "q_proj_weight").detach()
+#                W_k = getattr(attn, "k_proj_weight").detach()
+#                W_v = getattr(attn, "v_proj_weight").detach()
+#                b_q = getattr(attn, "q_proj_bias", None)
+#                b_k = getattr(attn, "k_proj_bias", None)
+#                b_v = getattr(attn, "v_proj_bias", None)
                 if b_q is not None: b_q = b_q.detach()
                 if b_k is not None: b_k = b_k.detach()
                 if b_v is not None: b_v = b_v.detach()
@@ -561,109 +861,3 @@ class DecisionTransformer_Step8_NewAttn(nn.Module):
     def get_state_embed_weight(self):
         """観測ベクトル → 埋め込み への線形層の重み (D, obs_dim) を返す"""
         return self.embed_state.weight.detach()
-
-
-# DTのMLP化検証 復元step8attn
-class DecisionTransformer_Step8_Attn(nn.Module):
-    def __init__(self, obs_dim, act_dim, context_len=5, embed_dim=128, n_layer=3, n_head=4):
-        super().__init__()
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.context_len = context_len
-        self.embed_dim = embed_dim
-
-        self.embed_timestep = nn.Embedding(TIMESTEP_MAX, embed_dim)
-        self.embed_return = nn.Linear(1, embed_dim)
-        self.embed_state = nn.Linear(obs_dim, embed_dim)
-        self.embed_action = nn.Linear(act_dim, embed_dim)
-
-        self.dropout = nn.Dropout(0.1)
-
-        # カスタム Transformer Encoder を使用
-        self.layers = nn.ModuleList([
-            CustomTransformerEncoderLayer(d_model=embed_dim, nhead=n_head)
-            for _ in range(n_layer)
-        ])
-
-        self.predict_action = nn.Linear(embed_dim, act_dim)
-
-    def forward(self, timesteps, states, actions, returns_to_go):
-        B, T = states.shape[0], states.shape[1]
-        if timesteps.ndim == 3:
-            timesteps = timesteps.squeeze(-1)
-
-        time_emb = self.embed_timestep(timesteps)
-        state_emb = self.embed_state(states) + time_emb
-        action_emb = self.embed_action(actions) + time_emb
-        return_emb = self.embed_return(returns_to_go) + time_emb
-
-        stacked = torch.stack((state_emb, action_emb, return_emb), dim=2)
-        stacked = stacked.view(B, -1, self.embed_dim)
-
-        x = self.dropout(stacked)
-        x = x.permute(1, 0, 2)  # (seq_len, B, D)
-
-        for layer in self.layers:
-            x = layer(x)
-
-        x = x.permute(1, 0, 2)  # (B, seq_len, D)
-        x = x[:, 0::3]  # 予測に使うstateトークン位置
-        return self.predict_action(x)
-
-    def get_attention_maps(self):
-        # 各レイヤーから注意重みを取得
-        return [layer.attn_weights for layer in self.layers]
-
-
-# DTのMLP化検証 復元
-class DecisionTransformer_org(nn.Module):
-    def __init__(self, obs_dim, act_dim, context_len=20, embed_dim=128, n_layer=4, n_head=4):
-        super().__init__()
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.context_len = context_len
-        self.embed_dim = embed_dim
-        self.embed_timestep = nn.Embedding(TIMESTEP_MAX, embed_dim)
-        self.embed_return = nn.Linear(1, embed_dim)
-        self.embed_state = nn.Linear(obs_dim, embed_dim)
-        self.embed_action = nn.Linear(act_dim, embed_dim)
-        self.dropout = nn.Dropout(0.1)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layer)
-        self.predict_action = nn.Sequential(
-            nn.Linear(embed_dim, act_dim)
-        )
-
-
-    def forward(self, timesteps, states, actions, returns_to_go):
-        """
-        timesteps: (B, T)
-        states: (B, T, obs_dim)
-        actions: (B, T, act_dim)
-        returns_to_go: (B, T, 1)
-        """
-        B, T = states.shape[0], states.shape[1]
-
-        # 🔧 修正：timestepsのshapeが(B, T, 1)だった場合に備える
-        if timesteps.ndim == 3:
-            timesteps = timesteps.squeeze(-1)  # (B, T, 1) → (B, T)
-
-        # Embeddings
-        time_embeddings = self.embed_timestep(timesteps)                # (B, T, D)
-        state_embeddings = self.embed_state(states) + time_embeddings  # (B, T, D)
-        action_embeddings = self.embed_action(actions) + time_embeddings
-        return_embeddings = self.embed_return(returns_to_go) + time_embeddings
-
-        # Stack as (r1, s1, a1, r2, s2, a2, ..., rT, sT, aT)
-        stacked_inputs = torch.stack((return_embeddings, state_embeddings, action_embeddings), dim=2)
-        stacked_inputs = stacked_inputs.view(B, -1, self.embed_dim)  # (B, 3*T, D)
-
-        x = self.dropout(stacked_inputs)
-        x = x.permute(1, 0, 2)  # (L, B, D)
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # (B, L, D)
-
-        # extract state token positions → predict next action
-        x = x[:, 1::3]  # s1, s2, ..., sT
-
-        return self.predict_action(x)  # (B, T, act_dim)

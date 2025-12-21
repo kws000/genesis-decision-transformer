@@ -1,8 +1,3 @@
-"""
-figure_eight_follow.py
-----------------------
-Simple car -> Figure-Eight path following demo (Genesis 0.3.0.dev0)
-"""
 
 import math
 from math import radians
@@ -11,8 +6,8 @@ import time
 from pathlib import Path
 import numpy as np
 import pkgutil, inspect
-from genesis.utils.geom  import euler_to_quat
-import genesis as gs
+import genesis as gs # type: ignore
+from genesis.utils.geom  import euler_to_quat # type: ignore
 import pandas as pd
 import random
 import torch
@@ -77,27 +72,33 @@ def generate_bernoulli_waypoints(
     return pts + center
 
 # False:PurePursaitによる運転と教師CSVの収集、True:bc_modelによる推論運転
-is_mode_ai = False#True
+is_mode_bc_model = False#True
 # ビュアーやSleepをスキップする高速モード
 is_mode_fast = True#False
 
 # 経路情報
 WAYPOINTS = generate_bernoulli_waypoints(a=2.0) # 0.5 m matches the OBJ
-
 # アクセル制御パラメータ
 TARGET_SPEED   = 8.0#5.0#3.0#15.0#1.5      # m/s: 巡航目標
 KP_SPEED       = 0.1#0.006#1.0         #    : 車速 P 利得
 KI_SPEED       = 0.006#0.001#0.0         #    : （必要なら）積分利得  ※これがないとカーブで推進力が足りなくなる
 FORCE_CLIP     = 1.5#0.5
-
 # Pure-Pursuit + フィルタ用パラメータ
 K_LOOK = 1.0#2.0#1.0#1.5#0.6#1.2           # ルックアヘッド・タイムスケール [s]
 V_EPS = 0.5#0.1            # 最低速度下限 [m/s]
 MAX_STEER_RAD = 3.1415926535 * 80.0 / 180    # ステア最大角度
-
 # LatencyFilter 用パラメーター
 FILTER_TAU = 0.15      # フィルタ時定数 [s]
 CONTROL_DT = 0.02      # 制御ループ周期 [s]。1/50Hz くらい
+
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+# ===== Plan A（短ホライズン参照点）設定 =====
+PLAN_M = 3
+# 速度依存ルックアヘッド LA(v) に対する比率（turn-in / apex / track-out のイメージ）
+PLAN_FACTORS = [0.7, 1.4, 2.2]  # len=PLAN_M
+PLAN_LA_MIN = 0.5#5.0   # [m]
+PLAN_LA_MAX = 3.0#30.0  # [m]
+
 
 # vは正規化不要とのこと
 #roll pitch yaw の順は ROS では標準
@@ -294,7 +295,80 @@ def pure_pursuit_steer(target_wp: np.ndarray,
 
     return delta_pp
 
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+# === 追加: ワールド→車体座標 ===
+def world_to_ego(px: float, py: float, ego_pos: np.ndarray, ego_yaw: float) -> tuple[float, float]:
+    dx = px - ego_pos[0]
+    dy = py - ego_pos[1]
+    c = math.cos(ego_yaw); s = math.sin(ego_yaw)
+    # ローカルx=前方, y=左+（PPの式と整合）
+    ex =  c * dx + s * dy
+    ey = -s * dx + c * dy
+    return float(ex), float(ey)
 
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+# === 追加: 折れ線WAYPOINTS上を距離dだけ先に進んだ点（世界座標）を返す ===
+def point_ahead_on_waypoints(waypoints: np.ndarray,
+                             start_pos_world: np.ndarray,
+                             start_wp_idx: int,
+                             direc: int,
+                             distance: float) -> np.ndarray:
+    """
++    折れ線 path 上の「現在位置→次WP→…」に沿って distance[m] 先の点を線形補間で返す。
++    - start_pos_world: 現在の車体位置 [x,y]
++    - start_wp_idx   : 現在の「ターゲットWP」のインデックス（pathの参照起点）
++    - direc          : +1 or -1
++    """
+
+#pos_xy→xyz
+    wp = np.asarray(waypoints)
+    # (N,3) の場合は XY だけ使う。 (N,2) はそのまま
+    if wp.ndim != 2 or wp.shape[0] == 0:
+        return np.asarray(start_pos_world[:2], dtype=np.float32)
+    if wp.shape[1] >= 2:
+        wp_xy = wp[:, :2].astype(np.float32)
+    else:
+        # まさかの1列なら0で拡張
+        wp_xy = np.pad(wp.astype(np.float32), ((0,0),(0,2-wp.shape[1])), mode="constant")
+    N = wp_xy.shape[0]
+    # 1本目の区間: 現在位置(xy) -> target_wp(xy)
+    seg_start = np.asarray(start_pos_world[:2], dtype=np.float32)
+    seg_end   = wp_xy[start_wp_idx % N]
+#    N = len(waypoints)
+#    # 1本目の区間: 現在位置 -> target_wp
+#    seg_start = start_pos_world.astype(np.float32)
+#    seg_end   = waypoints[start_wp_idx % N].astype(np.float32)
+
+    remain = float(distance)
+    # まずは現在位置から target_wp まで
+    for _ in range(N * 2):  # 安全上限
+        v = seg_end - seg_start
+        seg_len = float(np.linalg.norm(v))
+        if seg_len < 1e-6:
+            # 極短セグメントはスキップ
+            seg_start = seg_end
+        else:
+            if remain <= seg_len:
+                r = remain / seg_len
+#pos_xy→xyz
+                pt = seg_start + r * v
+                return np.asarray(pt, dtype=np.float32)                
+#                return seg_start + r * v
+            
+            remain -= seg_len
+            seg_start = seg_end
+        # 以降の区間: wp[i] -> wp[i+direc]
+#pos_xy→xyz
+        next_idx = (start_wp_idx + direc) % N
+        seg_end = wp_xy[next_idx]
+#        next_idx = (start_wp_idx + direc) % N
+#        seg_end = waypoints[next_idx].astype(np.float32)
+
+        start_wp_idx = next_idx
+    # 走り切っても足りない場合は最後の点を返す
+#pos_xy→xyz
+    return np.asarray(seg_end, dtype=np.float32)
+#    return seg_end
 
 def get_obs(car_pos,car_vel,car_yaw,target_wp,target_next_wp,passed,is_first_check_point):
 
@@ -326,12 +400,16 @@ def get_obs(car_pos,car_vel,car_yaw,target_wp,target_next_wp,passed,is_first_che
     if is_first_check_point:
         perp_error = 0.0
 
+    #計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
+    target_wp_subvec = target_wp - car_pos
+    target_wp_relative_x =  math.cos(car_yaw)*target_wp_subvec[0] + math.sin(car_yaw)*target_wp_subvec[1]
+    target_wp_relative_y = -math.sin(car_yaw)*target_wp_subvec[0] + math.cos(car_yaw)*target_wp_subvec[1]
     
-# 断続しないヨー角 １０次元に
     car_yaw_sin,car_yaw_cos = yaw_to_sin_cos(car_yaw)
-    return np.array([target_wp[0], target_wp[1], car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
-#    # ９次元に拡張し順序を合わせる　要素が間違っている
-#    return np.array([target_wp[0], target_wp[1], car_pos[0], car_pos[1], car_yaw, car_vel, perp_error, heading_error,passed], dtype=np.float32)
+
+#計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
+    return np.array([target_wp_relative_x, target_wp_relative_y, car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
+#    return np.array([target_wp[0], target_wp[1], car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
 
 def compute_reward(obs,t):
     # obs = [x, y, yaw, speed, cross_track_err, heading_err]
@@ -409,40 +487,30 @@ def run_control_loop(scene, car,sphere,bc_model):
 
     # — PID state —
     integ_speed_error = 0.0
-
     waypoint_direc = -1 if random.randint(0,100) < 50 else 1#1で正方向、-1で逆方向
     start_waypoint_idx = random.randint(0, len(WAYPOINTS)-1)
     end_waypoint_idx = (start_waypoint_idx - waypoint_direc) % len(WAYPOINTS)
-
     waypoint_idx = start_waypoint_idx
 
     # 車の初期位置
     set_car_start_pos(car,start_waypoint_idx,waypoint_direc)
 
-
     # ----- 初期化フェーズ -----
     latency_filter = LatencyFilter(tau=FILTER_TAU, dt=CONTROL_DT)
 
-    test_counter = 0
-
-
     # 教師データ
     data_log = []
-
     # 経過時間の記録
     t = 0.0
-
     # トータル報酬を可視化
     reward_total = 0.0
-
     # Debug arrow
     debug_arrow_segment = None
     debug_arrow_target = None
+    debug_arrow_plans = [None,None,None]
 
 # ----- 制御ループ（例: Genesis4D の step() 内など） -----
     for step in range(20_0000):
-
-        #新しい制御
 
         # ───────────
         # 1) 現在位置（車体 root link の COM）
@@ -479,26 +547,11 @@ def run_control_loop(scene, car,sphere,bc_model):
 
         # ターゲット球
         if sphere is not None:
-
             # lookaheadによる動的算出位置
             sphere.set_pos((
                 target_wp[0],
                 target_wp[1],
                 0.5))
-
-            # 現在インデックス位置
-#            sphere.set_pos((
-#                WAYPOINTS[waypoint_idx][0],
-#                WAYPOINTS[waypoint_idx][1],
-#                0.5))
-
-            # インデックス全体の位置確認
-#            sphere.set_pos((
-#                WAYPOINTS[test_counter%len(WAYPOINTS)][0],
-#                WAYPOINTS[test_counter%len(WAYPOINTS)][1],
-#                0.5))
-#            test_counter+=1
-
 
         # ターゲット方向
         dx, dy = target_wp - pos_xy
@@ -507,6 +560,11 @@ def run_control_loop(scene, car,sphere,bc_model):
         # Debug arrow
         if debug_arrow_segment is not None:
             scene.clear_debug_object(debug_arrow_segment)
+
+        # Debug arrow
+        for arrow_plan in debug_arrow_plans:
+            if arrow_plan is not None:
+                scene.clear_debug_object(arrow_plan)
 
         segment_len = np.linalg.norm(segment)
         if segment_len > 0.001:
@@ -518,7 +576,7 @@ def run_control_loop(scene, car,sphere,bc_model):
                 pos=(target_wp[0], target_wp[1], 0.1),
                 vec=(segment[0]*scale, segment[1]*scale, 0.0),
                 radius=0.005, color=(0, 0, 1, 0.5))  # Blue
-        
+
         # Debug arrow
         if debug_arrow_target is not None:
             scene.clear_debug_object(debug_arrow_target)
@@ -528,29 +586,22 @@ def run_control_loop(scene, car,sphere,bc_model):
                 vec=(dx, dy, 0.0),
                 radius=0.005, color=(0, 1, 0, 0.5))  # Green
 
-
         # 残り時間カウント
         time_bonus_max = 30.0 # 30秒以上なら報酬なし
         rest_time = time_bonus_max - t
 
-        if is_mode_ai:
-
+        if is_mode_bc_model:
             # AIによる自動運転モード
-
             # AI入力ベクトルを作成して推論
-
             # ターゲット方向
             dx, dy = target_wp - pos_xy
             target_yaw = math.atan2(dy, dx)
-
             # セグメント方向
             segment = target_next_wp - target_wp
-
             # ヘディング誤差（-pi ～ +pi に wrap）
             # ※車体とターゲット方向の角度差
             heading_error = target_yaw - yaw
             heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
-
             # CTE（ターゲット方向に直交する方向への距離）
             target_dir = target_wp - pos_xy
             target_dir = target_dir / np.linalg.norm(target_dir)
@@ -562,31 +613,22 @@ def run_control_loop(scene, car,sphere,bc_model):
             # ↓ + 1.0
             # 0.0 1.0 2.0   ※真正面で0.0　真横で1.0 真後ろで2.0
             perp_error = 1.0 - inner_angle
-
             #まだチェックポイント上に乗っていないのでコースアウトは無視する
             if waypoint_idx == start_waypoint_idx:
                 perp_error = 0.0
 
-# ９次元に拡張し順序を合わせる
             input_array = np.array([
                 target_wp[0], target_wp[1],
                 pos_xy[0], pos_xy[1], yaw, car_speed,
                 perp_error,heading_error,passed
             ], dtype=np.float32)
-#            input_array = np.array([
-#                pos_xy[0], pos_xy[1], yaw, car_speed,
-#                target_wp[0], target_wp[1]
-#            ], dtype=np.float32)
 
             input_tensor = torch.tensor(input_array)
 
             with torch.no_grad():
                 steer_angle, throttle = bc_model(input_tensor).tolist()
-                # 物理的に許容できる角度に制限
                 steer_angle = max(-MAX_STEER_RAD, min(MAX_STEER_RAD, steer_angle))
-
         else:
-        
             # 6) Pure-Pursuit で生ステア角を計算
             #    WAYPOINTS が (N,2) 形式ならそのまま渡せる
             delta_pp = pure_pursuit_steer(
@@ -620,12 +662,46 @@ def run_control_loop(scene, car,sphere,bc_model):
                           ,is_first_check_point=is_first)
             # 報酬
             reward = compute_reward(obs=obs,t=t)
-
             reward_total += reward
 
             print(f"[{t:.3f}]教師 reward {reward:.2f} total {reward_total:.2f}")
 
             # 教師データ記録
+
+            #計画と行動のマルチタスクモデル　教師データに計画を入れる
+            # ==== Plan A: 将来参照点（ego座標）を生成 ====
+            # 速度連動 lookahead（計画用は固定化せず v に追従）
+            LA = L
+#            LA = compute_lookahead(v=car_speed, k_la=K_LOOK, v_eps=V_EPS)
+#            LA = max(PLAN_LA_MIN, min(PLAN_LA_MAX, LA))
+            dists = [f * LA for f in PLAN_FACTORS[:PLAN_M]]
+            plan_xy: list[float] = []
+            #　計画ベクトル列の可視化
+            debug_plan_xy_world: list[float] = []
+            for d in dists:
+                w_pt = point_ahead_on_waypoints(WAYPOINTS, pos_xy, waypoint_idx, waypoint_direc, d)
+                ex, ey = world_to_ego(w_pt[0], w_pt[1], pos_xy, yaw)
+                plan_xy.extend([ex, ey])  # [x1,y1,x2,y2,x3,y3]
+                #　計画ベクトル列の可視化
+                debug_plan_xy_world.extend([w_pt[0],w_pt[1]])
+
+            #　計画ベクトル列の可視化
+            for i in range(0,2):
+                allow_plan_src_x = debug_plan_xy_world[i*2+0]
+                allow_plan_src_y = debug_plan_xy_world[i*2+1]
+
+                allow_plan_dst_x = debug_plan_xy_world[(i+1)*2+0]
+                allow_plan_dst_y = debug_plan_xy_world[(i+1)*2+1]
+
+                segment_plan_x = allow_plan_dst_x - allow_plan_src_x
+                segment_plan_y = allow_plan_dst_y - allow_plan_src_y
+
+                debug_arrow_plans[i] = scene.draw_debug_arrow(
+                        pos=(allow_plan_src_x, allow_plan_src_y, 0.1),
+                        vec=(segment_plan_x, segment_plan_y, 0.0),
+                        radius=0.005, color=(0, 1, 1, 0.5))  # LightBlue
+
+            # 教師データ記録（plan_x*, plan_y* を追加）
             data_log.append({
                 # 環境
                 "target_wp_x": obs[0],# target_wp[0],# ９次元に拡張し順序を合わせる
@@ -635,7 +711,6 @@ def run_control_loop(scene, car,sphere,bc_model):
                 # 断続しないヨー角 １０次元に    
                 "yaw_sin": obs[4],          #yaw,
                 "yaw_cos": obs[5],          #yaw,
-#                "yaw": obs[4],          #yaw,
                 "velocity": obs[5+1],     #car_speed,
                 "perp_error":obs[6+1],    #0.0,           # ９次元に拡張し順序を合わせる
                 "heading_error":obs[7+1], #0.0,        # ９次元に拡張し順序を合わせる
@@ -644,7 +719,14 @@ def run_control_loop(scene, car,sphere,bc_model):
                 "steer_angle": steer_angle,
                 "throttle": throttle,       
                 # 報酬
-                "reward": reward       
+#計画と行動のマルチタスクモデル　教師データに計画を入れる
+                "reward": reward,       # ← ステップ報酬（学習に使う）
+                "reward_total": reward,  # ← 参考：累積（解析用）                
+                # 計画（ego座標の将来点; M=3 固定）
+                "plan_x1": plan_xy[0], "plan_y1": plan_xy[1],
+                "plan_x2": plan_xy[2], "plan_y2": plan_xy[3],
+                "plan_x3": plan_xy[4], "plan_y3": plan_xy[5],                
+#                "reward": reward       
             })
 
         # 一周したらおわり
@@ -653,35 +735,27 @@ def run_control_loop(scene, car,sphere,bc_model):
             df = pd.DataFrame(data_log)
             df.to_csv("expert_data/expert_data.csv", index=False)
             return
-
-
+        
         # 9) Command 発行
         #    ここで steer_angle, throttle を実行関数に渡す
         car.control_dofs_position([steer_angle, steer_angle], idx_steer)
         car.control_dofs_force([throttle, throttle], idx_wheels)
-
         # 経過時間の記録
         t += scene.dt
-
         # 10) Genesis4D のタイムステップを回す
         scene.step()
 
-#        # Optional: 可視化確認
-#        if step % 200 == 0:
-#            print(f"step {step:5d} | pos=({pos_xy[0]: .2f},{pos_xy[1]: .2f}) "
-#                f"| car_speed={wheel_vel: .2f} m/s | steer={steer_angle: .2f} rad")
 
 # Viewer ありで CPU が苦しい場合は少し sleep# ---------------------------------------------------------------------------
 # 2) Genesis 初期化 & シーン構築
 # ---------------------------------------------------------------------------
 def build_scene(path_to_mjcf: str | Path):
 
-
 #急にエラーで動かなくなった、、、
 #   Backend tkagg is interactive backend. Turning interactive mode on.
 #   [Genesis] [01:24:48] [WARNING] No Intel XPU device available. Falling back to CPU for torch device.
 #   Assertion failed: pCreateInfo->vulkanApiVersion == 0 || (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 22U) == 1 && (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 12U) & 0x3FFU) <= 3), file C:\Users\buildbot\actions-runner\_work\taichi\taichi\external\VulkanMemoryAllocator\include\vk_mem_alloc.h, line 16039
-    gs.init(backend=gs.cpu)
+    gs.init(backend=gs.cpu,logging_level="warning")
 #gs.init(backend=gs.gpu,logging_level="warning")  # ← CPU でも OK
     
     scene = gs.Scene(
