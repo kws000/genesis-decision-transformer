@@ -1,204 +1,189 @@
-import pickle
+
+#ボトルネック認識とVmax魂の注入 5.1 丸ごと置き換えた
+
+import os, pickle
 import numpy as np
-import os
 
-
-# パス設定
-input_path = "trajectories/trajectory_data.pkl"
-output_path = "data_dt/trajectories_dt.pkl"
-norm_path = "data_dt/mean_std.pkl"
-os.makedirs("trajectories", exist_ok=True)
+# ── パス設定 ─────────────────────────────────────────────
+INPUT_PKL  = "trajectories/trajectory_data.pkl"   # export_csv_to_pkl の出力
+OUTPUT_PKL = "data_dt/trajectories_dt.pkl"        # DT学習用
+NORM_PKL   = "data_dt/mean_std.pkl"
 os.makedirs("data_dt", exist_ok=True)
 
-TIMESTEP_MAX = 4000
+# ── ハイパラ ─────────────────────────────────────────────
+TIMESTEP_MAX = 4096  # 位置埋め込みの語彙上限と揃える（例）
 
-# データ読み込み
-with open(input_path, "rb") as f:
-    raw_trajectories = pickle.load(f)
+# ── OBS V2 スキーマ（参照用/検証用） ─────────────────────
+OBS_V2_DIM = 19  # 既存10 + VMAX塊9
 
-# 軌跡ごとのデータ抽出
+def _ensure_2d(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x)
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+    return x
 
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-observations, actions, returns, plans = [], [], [], []
-plan_dim = None
-#observations, actions, returns = [], [], []
+def _finite_or_raise(name: str, arr: np.ndarray):
+    if not np.isfinite(arr).all():
+        bad = np.where(~np.isfinite(arr))
+        raise RuntimeError(f"[convert_to_dt_format] {name} contains NaN/Inf at indices {bad}")
 
+def main():
+    # ── 入力ロード ───────────────────────────────────────
+    with open(INPUT_PKL, "rb") as f:
+        raw = pickle.load(f)
 
-print("type of raw_trajectories:", type(raw_trajectories))
-if isinstance(raw_trajectories, dict):
-    print("Keys:", raw_trajectories.keys())
+    # 形式: [trajectory, ...] 想定（collect_trajectory）
+    if isinstance(raw, dict):
+        # まれに dict1本のケースに保険
+        raw = [raw]
 
-discounted_return_last = []
+    observations, actions, returns, plans = [], [], [], []
+    have_plan = False
 
-for traj in raw_trajectories:
-    obs = traj["obs"]
-    act = traj["action"]
-    rew = traj["reward"]
+    for traj in raw:
+        obs = _ensure_2d(np.asarray(traj["obs"], dtype=np.float32))          # (T, 19)
+        act = _ensure_2d(np.asarray(traj["action"], dtype=np.float32))       # (T, A)
+        rew = np.asarray(traj["reward"], dtype=np.float32).reshape(-1)       # (T,)
+        pln = traj.get("plan", None)                                         # (T, 2M) or None
 
-    #計画と行動のマルチタスクモデル　教師データに計画を入れる
-    plan = traj.get("plan", None)   # (T, 2M) or None
+        # 形の基本検証
+        assert obs.shape[1] == OBS_V2_DIM, f"obs_dim {obs.shape[1]} != {OBS_V2_DIM}"
+        assert obs.shape[0] == act.shape[0] == rew.shape[0], "T mismatch among obs/act/reward"
 
-    print("type:", type(traj["action"]))
-    print("len:", len(traj["action"]))
-    print("element 0:", traj["action"][0])
-    print("element 0 shape:", np.shape(traj["action"][0]))
+        # RTG（割引なし累積） (T,1)
+        rtg = np.zeros_like(rew, dtype=np.float32)
+        acc = 0.0
+        for i in range(len(rew) - 1, -1, -1):
+            acc += rew[i]
+            rtg[i] = acc
+        rtg = rtg.reshape(-1, 1)
 
-    # 報酬がスカラーならリストに
-    if isinstance(rew, (float, np.floating)):
-        rew = [rew]
+        # plan
+        if pln is not None:
+            pln = _ensure_2d(np.asarray(pln, dtype=np.float32))  # (T, 2M)
+            assert pln.shape[0] == obs.shape[0], "T mismatch in plan"
+            plans.append(pln)
+            have_plan = True
 
-    #計画と行動のマルチタスクモデル　教師データに計画を入れる    
-    rew = np.asarray(rew, dtype=np.float32).reshape(-1)
+        observations.append(obs)
+        actions.append(act)
+        returns.append(rtg)
 
-    # RTG 計算（割引なしの累積）
-    discounted_return = []
-    ret = 0
+    # ── 正規化統計 ──────────────────────────────────────
 
-    for r in reversed(rew):
-        ret += r
-        discounted_return.insert(0, ret)
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+    all_obs  = np.concatenate(observations, axis=0).astype(np.float32)  # (∑T, 19)
+    all_rtg  = np.concatenate(returns, axis=0).astype(np.float32)       # (∑T, 1)
+    all_plan = np.concatenate(plans, axis=0).astype(np.float32) if have_plan else None
+#    all_obs = np.concatenate(observations, axis=0)     # (∑T, 19)
+#    all_rtg = np.concatenate(returns, axis=0)          # (∑T, 1)
+#    all_plan = np.concatenate(plans, axis=0) if have_plan else None
 
-    # reshape により (T,) → (T, 1) を明示
-    obs = np.array(obs)
+    _finite_or_raise("observations", all_obs)
+    _finite_or_raise("returns", all_rtg)
+    if have_plan:
+        _finite_or_raise("plan", all_plan)
 
-    if obs.ndim == 1:
-        obs = obs.reshape(-1, 1)
-
-    act = np.array(act)
-    if act.ndim == 1:
-        act = act.reshape(-1, 1)
-
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-    discounted_return = np.array(discounted_return, dtype=np.float32)
-    if discounted_return.ndim == 1:
-        discounted_return = discounted_return.reshape(-1, 1)
-#    discounted_return = np.array(discounted_return)
-#    if discounted_return.ndim == 1:
-#        discounted_return = discounted_return.reshape(-1, 1)
-#    discounted_return_last = discounted_return
-
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-    observations.append(obs)
-    actions.append(act)
-    returns.append(discounted_return)
-    if plan is not None:
-        plan = np.asarray(plan, dtype=np.float32)
-        if plan.ndim == 1:
-            plan = plan.reshape(-1, 1)
-        if plan_dim is None:
-            plan_dim = plan.shape[1]
-        plans.append(plan)
-#    observations.append(obs)
-#    actions.append(act)
-#    returns.append(discounted_return)
-
-
-
-    print("action sample shape:", actions[0].shape)
-
-# 正規化用統合
-all_obs = np.concatenate(observations, axis=0)
-all_returns = np.concatenate(returns, axis=0)
-
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-all_plan = np.concatenate(plans, axis=0)
-
-# === 統計量の更新 or 読み込み ===
-if os.path.exists(norm_path):
-    with open(norm_path, "rb") as f:
-        norm_data = pickle.load(f)
-    obs_mean_prev = norm_data["obs_mean"]
-    obs_std_prev = norm_data["obs_std"]
-    count_prev = norm_data.get("count", 1)
-
-    if obs_mean_prev.shape[0] != all_obs.shape[1]:
-        print("⚠️ 観測次元が前回と異なります。統計をリセットします。")
-        obs_mean_prev = np.zeros(all_obs.shape[1], dtype=np.float32)
-        obs_std_prev = np.ones(all_obs.shape[1], dtype=np.float32)
-        count_prev = 0
-else:
-    obs_mean_prev = np.zeros(all_obs.shape[1], dtype=np.float32)
-    obs_std_prev = np.ones(all_obs.shape[1], dtype=np.float32)
-    count_prev = 0
-
-count_new = all_obs.shape[0]
-obs_mean_new = all_obs.mean(axis=0)
-obs_std_new = all_obs.std(axis=0) + 1e-6
-
-obs_mean = (obs_mean_prev * count_prev + obs_mean_new * count_new) / (count_prev + count_new)
-obs_std = np.maximum(obs_std_prev, obs_std_new)
-ret_mean = all_returns.mean(axis=0)
-ret_std = all_returns.std(axis=0) + 1e-6
-
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-plan_mean = all_plan.mean(axis=0)
-plan_std  = all_plan.std(axis=0) + 1e-6
-
-
-# 保存用リスト
-
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-dt_trajectories = []
-for i in range(len(observations)):
-    obs = observations[i]; act = actions[i]; ret = returns[i]
-    obs_norm = (obs - obs_mean) / obs_std
-    ret_norm = (ret - ret_mean) / ret_std
-    timesteps = np.arange(len(obs), dtype=np.int64) % TIMESTEP_MAX
-    item = {
-        "observations": obs_norm,   # 学習は正規化済みobsをそのまま使用
-        "actions":      act,
-        "returns":      ret_norm,   # 正規化RTG（トークン & 重み付けの基準）
-        "timesteps":    timesteps,
-        "initial_rtg":  ret[:1].copy(),  # 先頭RTGを (1,1) で保存
-    }
-    if len(plans) > 0:
-        item["plan"] = plans[i]     # (T, 2M)
-    dt_trajectories.append(item)
-#dt_trajectories = []
-#for obs, act, ret in zip(observations, actions, returns):
-#    obs_norm = (obs - obs_mean) / obs_std
-#    ret_norm = (ret - ret_mean) / ret_std
-#    timesteps = np.arange(len(obs), dtype=np.int64).reshape(-1)
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+#    # 既存統計の増分更新にも対応（なければリセット）
+#    if os.path.exists(NORM_PKL):
+#        with open(NORM_PKL, "rb") as f:
+#            norm = pickle.load(f)
+#        obs_mean_prev = np.asarray(norm["obs_mean"], dtype=np.float32)
+#        obs_std_prev  = np.asarray(norm["obs_std"], dtype=np.float32)
+#        count_prev    = int(norm.get("count", 0))
+#        # 観測次元が変わったらリセット
+#        if obs_mean_prev.shape[0] != all_obs.shape[1]:
+#            obs_mean_prev = np.zeros(all_obs.shape[1], dtype=np.float32)
+#            obs_std_prev  = np.ones(all_obs.shape[1], dtype=np.float32)
+#            count_prev    = 0
+#    else:
+#        obs_mean_prev = np.zeros(all_obs.shape[1], dtype=np.float32)
+#        obs_std_prev  = np.ones(all_obs.shape[1], dtype=np.float32)
+#        count_prev    = 0
 #
-#    # TIMESTEP_MAX 以上はまずい
-#    timesteps = timesteps % TIMESTEP_MAX
+#    count_new = all_obs.shape[0]
+
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+    obs_mean = all_obs.mean(axis=0).astype(np.float32)
+    obs_std  = all_obs.std(axis=0).astype(np.float32) + 1e-6
+#    obs_mean_new = all_obs.mean(axis=0)
+#    obs_std_new  = all_obs.std(axis=0) + 1e-6
 #
-#    dt_trajectories.append({
-#        "observations": obs_norm,
-#        "actions": act,
-#        "returns": ret_norm,
-#        "timesteps": timesteps,
-#        "initial_rtg": discounted_return_last,  # ←追加        
-#    })
+#    # 合成（分布変動に強くするため std は最大値を採用）
+#    obs_mean = (obs_mean_prev * count_prev + obs_mean_new * count_new) / max(1, (count_prev + count_new))
+#    obs_std  = np.maximum(obs_std_prev, obs_std_new)
 
-print("✅ 変換されたエピソード数:", len(dt_trajectories))
+    # RTGはバッチ正規化用途：ここでは全体で標準化（1次元）
 
-# --- 保存 ---
-os.makedirs(os.path.dirname(output_path), exist_ok=True)
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+    ret_mean = all_rtg.mean(axis=0).astype(np.float32)   # shape (1,)
+    ret_std  = all_rtg.std(axis=0).astype(np.float32) + 1e-6
+#    ret_mean = all_rtg.mean(axis=0)
+#    ret_std  = all_rtg.std(axis=0) + 1e-6
 
-with open(output_path, "wb") as f:
-    pickle.dump(dt_trajectories, f)
+    if have_plan:
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+        plan_mean = all_plan.mean(axis=0).astype(np.float32)
+        plan_std  = all_plan.std(axis=0).astype(np.float32) + 1e-6
+#        plan_mean = all_plan.mean(axis=0)
+#        plan_std  = all_plan.std(axis=0) + 1e-6
 
-with open(norm_path, "wb") as f:
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-    out_stats = {        
-        "obs_mean": obs_mean,
-        "obs_std": obs_std,
-        "ret_mean": ret_mean,
-        "ret_std": ret_std,
-        "count": count_prev + count_new,
+    # ── 出力DTフォーマットへ詰め替え ────────────────────
+    dt_trajectories = []
+    for i in range(len(observations)):
+        obs = observations[i]                           # (T, 19)
+        act = actions[i]                                # (T, A)
+        rtg = returns[i]                                # (T, 1)
+
+        obs_norm = (obs - obs_mean) / obs_std
+        rtg_norm = (rtg - ret_mean) / ret_std
+
+        T = obs.shape[0]
+        timesteps = (np.arange(T, dtype=np.int64) % TIMESTEP_MAX)
+
+        item = {
+            "observations": obs_norm.astype(np.float32),
+            "actions":      act.astype(np.float32),
+            "returns":      rtg_norm.astype(np.float32),
+            "timesteps":    timesteps,
+            "initial_rtg":  rtg[:1].copy().astype(np.float32),  # 非正規化の先頭RTG（参照用）
+        }
+        if have_plan:
+            item["plan"] = plans[i].astype(np.float32)          # (T, 2M)
+
+        # 最終NaNチェック
+        for k in ["observations", "actions", "returns"]:
+            _finite_or_raise(k, item[k])
+
+        dt_trajectories.append(item)
+
+    # ── 保存 ───────────────────────────────────────────
+    with open(OUTPUT_PKL, "wb") as f:
+        pickle.dump(dt_trajectories, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    out_stats = {
+        "obs_mean": obs_mean.astype(np.float32),
+        "obs_std":  obs_std.astype(np.float32),
+        "ret_mean": ret_mean.astype(np.float32),
+        "ret_std":  ret_std.astype(np.float32),
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+#        "count":    int(count_prev + count_new),
+        "obs_version": "v2",
+        "obs_dim": int(OBS_V2_DIM),
     }
-    if all_plan is not None:
-        out_stats["plan_mean"] = plan_mean
-        out_stats["plan_std"]  = plan_std
-    pickle.dump(out_stats, f)
-#    pickle.dump({
-#        "obs_mean": obs_mean,
-#        "obs_std": obs_std,
-#        "ret_mean": ret_mean,
-#        "ret_std": ret_std,
-#        "count": count_prev + count_new,
-#    }, f)
+    if have_plan:
+        out_stats["plan_mean"] = plan_mean.astype(np.float32)
+        out_stats["plan_std"]  = plan_std.astype(np.float32)
 
+    with open(NORM_PKL, "wb") as f:
+        pickle.dump(out_stats, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-print("✅ DTフォーマット変換および統計保存が完了しました")
+    print(f"✅ DT変換 完了: {OUTPUT_PKL}")
+    print(f"   episodes={len(dt_trajectories)}, obs_dim={OBS_V2_DIM}, have_plan={have_plan}")
+
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+#    print(f"   stats -> {NORM_PKL}  (count={out_stats['count']})")
+
+if __name__ == "__main__":
+    main()

@@ -9,7 +9,9 @@ import numpy as np
 from model_dt import DecisionTransformer
 from train_dt import SequenceDataset  # または TrajectoryDataset
 from genesis_gym_env import GenesisEnv  # 必要に応じて調整
-from utils.trajectory_utils import normalize
+
+#ボトルネック認識とVmax魂の注入 7.1 外部ノーマライザは使わない
+#from utils.trajectory_utils import normalize
 
 #計画と行動のマルチタスクモデル
 import gymnasium as gym
@@ -134,11 +136,31 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
 #        n_head=n_head
     ).to(DEVICE)
 
- #最新モデルでリプレイする　別手法
-    model.load_state_dict(torch.load(checkpoint_path))
-#    model.load_state_dict(torch.load(CHECKPOINT_PATH))
-    
+
+#ボトルネック認識とVmax魂の注入 7.2 
+    assert traj["observations"].shape[1] == 19, f"OBS_V2(19) 想定。got {traj['observations'].shape[1]}"
+    # map_location を明示（CPUでもOKに）
+    state = torch.load(checkpoint_path, map_location=DEVICE)
+    model.load_state_dict(state, strict=True)
+#    model.load_state_dict(torch.load(checkpoint_path))
+
     model.eval()
+
+	#ボトルネック認識とVmax魂の注入 アクセルが負の数値になる
+    # === Probe 1: zero-input 出力を確認（埋め込み＋出力層の“素の向き”をチェック）===
+    with torch.no_grad():
+        B, T = 1, 1
+        t = torch.zeros(B, T, dtype=torch.long, device=DEVICE)
+        s = torch.zeros(B, T, model.obs_dim, device=DEVICE)
+        a = torch.zeros(B, T, model.act_dim, device=DEVICE)
+        r = torch.zeros(B, T, 1,             device=DEVICE)
+        # WPは何も与えない（分布影響を切り分けるため）
+        pa0, _, _ = model(t, s, a, r, wp=None, return_plan=False)
+        print("[CHK] zero-input pred =", pa0[0, 0].detach().cpu().numpy())
+    
+
+    #ボトルネック認識とVmax魂の注入 7.3 
+    torch.set_grad_enabled(False)
 
     # === 環境初期化 ===
 
@@ -153,8 +175,11 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
     total_reward = 0.0
     t = 0
 
-    # DTのMLP化検証 復元step8
-    obs_buffer = [obs] * context_len
+#ボトルネック認識とVmax魂の注入 7.4 過去文脈をゼロ埋めするより「直近obsの複製」の方が安定
+    obs_buffer = [obs.astype(np.float32)] * context_len
+#    obs_buffer = [obs] * context_len
+
+
     act_buffer = [np.zeros_like(traj["actions"][0])] * context_len
     timestep_buffer = [0] * context_len  # これは使われなくなるが残してOK
 
@@ -171,14 +196,19 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
     wp_mean_t = torch.tensor(norm.wp_mean, dtype=torch.float32, device=DEVICE)
     wp_std_t  = torch.tensor(norm.wp_std,  dtype=torch.float32, device=DEVICE)
 
+    #ボトルネック認識とVmax魂の注入 7.5 ログ用: 制約違反率（vel>limit_v_target）
+    viol_cnt = 0
+    steps_cnt = 0
+
     for t in range(100_000):
 
         # 正規化＋テンソル化
-# inference_dtに合わせる
-        obs_norm = normalize(np.array(obs_buffer), norm.obs_mean, norm.obs_std)
-        rtg_norm = normalize(np.array(rtg_buffer), norm.rtg_mean, norm.rtg_std)
-#        obs_norm = norm.normalize_obs(np.array(obs_buffer))
-#        rtg_norm = norm.normalize_rtg(np.array(rtg_buffer))
+
+#ボトルネック認識とVmax魂の注入 7.6 正規化（学習と同一の mean/std を使う）
+        obs_norm = norm.normalize_obs(np.array(obs_buffer, dtype=np.float32))   # (T,19)
+        rtg_norm = norm.normalize_rtg(np.array(rtg_buffer, dtype=np.float32))   # (T,1)
+#        obs_norm = normalize(np.array(obs_buffer), norm.obs_mean, norm.obs_std)
+#        rtg_norm = normalize(np.array(rtg_buffer), norm.rtg_mean, norm.rtg_std)
 
         actions_np = np.array(act_buffer)
         ts = np.array(timestep_buffer)
@@ -188,10 +218,16 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
         rtg_tensor = torch.tensor(rtg_norm.copy(), dtype=torch.float32).unsqueeze(0).to(DEVICE)
         ts_tensor  = torch.tensor(ts.copy(), dtype=torch.long).unsqueeze(0).to(DEVICE)
 
-#計画と行動のマルチタスクモデル 環境からWPプレビューを取得して正規化
-        wp_np = env.scene.get_wp_preview(K_WP)                         # (K,5)
-        wp_tensor = torch.tensor(wp_np, dtype=torch.float32, device=DEVICE).unsqueeze(0)  # (1,K,5)
-        wp_tensor = (wp_tensor - wp_mean_t) / (wp_std_t + 1e-6)
+#ボトルネック認識とVmax魂の注入 7.7 WPプレビュー（無い環境でも落ちないようにガード）
+        wp_np = getattr(env.scene, "get_wp_preview", lambda k: None)(K_WP)
+        if wp_np is not None and len(wp_np) > 0:
+            wp_tensor = torch.tensor(wp_np, dtype=torch.float32, device=DEVICE).unsqueeze(0)  # (1,K,5)
+            wp_tensor = (wp_tensor - wp_mean_t) / (wp_std_t + 1e-6)
+        else:
+            wp_tensor = None
+#        wp_np = env.scene.get_wp_preview(K_WP)                         # (K,5)
+#        wp_tensor = torch.tensor(wp_np, dtype=torch.float32, device=DEVICE).unsqueeze(0)  # (1,K,5)
+#        wp_tensor = (wp_tensor - wp_mean_t) / (wp_std_t + 1e-6)
 
 
 #計画と行動のマルチタスクモデル
@@ -202,6 +238,9 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
             )
             action = action_pred[0, -1].cpu().numpy()
 
+#ボトルネック認識とVmax魂の注入 7.8 行動クリップ（環境の許容範囲に合わせて調整）
+            action[0] = float(np.clip(action[0], -1.0, 1.0))  # steer
+            action[1] = float(np.clip(action[1], -1.0, 1.0))  # accel/brake
             # 計画の可視化
             debug_plan_xy = [0.0,0.0]
             if plan_hat is not None:
@@ -210,7 +249,7 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
                     debug_plan_xy = plan_hat[0, -1].cpu().numpy()   # (2M,)
                 else:
                     debug_plan_xy = plan_hat[0].cpu().numpy()       # (2M,)
-#                env.scene.debug_draw_plan_xy(debug_plan_xy)
+                env.scene.debug_draw_plan_xy(debug_plan_xy)
 
         # step: Gymnasium専用（5タプル）
         obs, reward, terminated, truncated, info = env.step(action)
@@ -228,7 +267,9 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
 
         # バッファ更新
         obs_buffer.pop(0)
-        obs_buffer.append(obs)
+#ボトルネック認識とVmax魂の注入 7.9 
+        obs_buffer.append(obs.astype(np.float32))
+#        obs_buffer.append(obs)
 
         act_buffer.pop(0)
         act_buffer.append(action)
@@ -242,12 +283,28 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
         timestep_buffer.pop(0)
         timestep_buffer.append(t % TIMESTEP_MAX)  # timestepは最大1024まで（Embedding制約）
 
+        #ボトルネック認識とVmax魂の注入 7.9 ログ: 制約違反カウント（OBS_V2: vel=idx6, limit=idx18）
+        steps_cnt += 1
+        try:
+            if obs[6] > obs[18]:
+                viol_cnt += 1
+        except Exception:
+            pass
+
         if done:
             print(f"✅ 終了ステップ数: {t}")
             print(f"✅ リプレイ情報の記録: start_waypoint_idx={env.scene.start_waypoint_idx} waypoint_direc={env.scene.waypoint_direc}")
             with open("replay_info.txt", "w") as f:
                  f.write(str(env.scene.start_waypoint_idx)+'\n')
                  f.write(str(env.scene.waypoint_direc)+'\n')
+                 
+            #ボトルネック認識とVmax魂の注入 7.10 ログ: 制約違反カウント（OBS_V2: vel=idx6, limit=idx18）
+            viol_rate = (viol_cnt / max(1, steps_cnt))
+            print(f"✅ 速度制約違反率: {viol_rate:.3f}")
+            with open("eval_score.txt", "w") as f:
+                f.write(f"total_reward={total_reward:.4f}\n")
+                f.write(f"violation_rate={viol_rate:.6f}\n")
+
             break
 
     return total_reward

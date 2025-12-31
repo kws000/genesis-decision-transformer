@@ -4,6 +4,28 @@ import time
 import shutil
 import re
 
+import os, glob, shutil, time, json
+from pathlib import Path
+
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ
+from debug_probes import probe_csv,probe_raw_pkl,probe_dt
+
+
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 リセット機構
+ROOT = Path(__file__).resolve().parent
+DATA_DIRS = [
+    ROOT/"expert_data",         # CSV
+    ROOT/"trajectories",        # raw PKL
+    ROOT/"data_dt",             # DT-PKL / mean_std
+]
+CKPT_DIR  = ROOT/"checkpoints"  # モデル
+TMP_FILES = [
+    ROOT/"checkpoints/temp_model.pt",
+    ROOT/"eval_score.txt",
+    ROOT/"replay_info.txt",
+]
+
+
 #最新モデルでリプレイする　別手法
 REPLAY_MODE = False#True#False
 CHECKPOINTS_DIR = "checkpoints"
@@ -54,6 +76,30 @@ step_configs = [
 ]
 
 # ----関数----
+
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 リセット機構
+def _rm(path: Path):
+    try:
+        if path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception as e:
+        print(f"[CLEAN] skip {path}: {e}")
+
+#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 リセット機構
+def clean_all_intermediates():
+    print("[CLEAN] removing old intermediates …")
+    for d in DATA_DIRS:
+        _rm(d)
+    for f in TMP_FILES:
+        _rm(f)
+    # checkpoints/ は消しすぎ注意：ステップ0の時だけ全部消す
+    if CKPT_DIR.exists():
+        for f in CKPT_DIR.glob("step*.pt"):
+            f.unlink(missing_ok=True)
+    print("[CLEAN] done.")
+
 
 # === 安定ステップを自動判定 ===
 def get_latest_stable_step():
@@ -127,6 +173,11 @@ def Evolution():
     stable_step = get_latest_stable_step()
     print(f"✅ 復元された安定ステップ: step{stable_step}")
 
+    #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 リセット機構
+    if stable_step < 0:
+        print(f"✅ 初回なので、全ての中間ファイルを削除")
+        clean_all_intermediates()
+
 
     # 前回までのスコアファイルと最終スコア値
     prev_score = 0
@@ -148,8 +199,19 @@ def Evolution():
 
         # --- データ生成と変換 ---
         subprocess.run(["python", "vehicle_control_drl.py"])
+
+        #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ run_control_loop(...) 等が終わった直後
+        probe_csv("expert_data/expert_data.csv")
+
         subprocess.run(["python", "expert_csv_to_pkl.py"])
+
+        #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ export_csv_to_pkl.py を呼んだ直後
+        probe_raw_pkl("trajectories/trajectory_data.pkl")
+			
         subprocess.run(["python", "convert_to_dt_format.py"])
+
+        #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ convert_to_dt_format.py を呼んだ直後
+        probe_dt("data_dt/trajectories_dt.pkl", "data_dt/mean_std.pkl")			
 
         # --- 学習（失敗時中断） ---
         # ここで暫定モデル temp_model.pt が生成される

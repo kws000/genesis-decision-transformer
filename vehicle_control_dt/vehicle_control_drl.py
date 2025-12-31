@@ -14,6 +14,85 @@ import torch
 from utils.trajectory_utils import yaw_to_sin_cos
 from utils.trajectory_utils import sin_cos_to_yaw
 
+#ボトルネック認識とVmax魂の注入 3.1 
+from pre_training.laws.laws_vmax_infer import VmaxFactorized  # 既存のラッパ
+
+
+#ボトルネック認識とVmax魂の注入 3.1 obsビルダー
+from geo_utils import curvature_from_wps
+
+#ボトルネック認識とVmax魂の注入 3.1 obsビルダー
+OBS_V2_KEYS = [
+    # 既存10
+    "target_wp_relative_x","target_wp_relative_y","pos_x","pos_y",
+    "yaw_sin","yaw_cos","velocity","perp_error","heading_error","passed",
+    # 追加9（VMAX塊）
+    "kappa_local","mu_local","vmax_local","v_ratio","headroom",
+    "vmax_min_hH","vmax_mean_hH","vmax_slope_hH","limit_v_target",
+]
+
+def build_obs_v2_pure(pos_xy, yaw, vel, passed,
+                      target_wp, target_next_wp,
+                      waypoint_idx, waypoint_direc, WAYPOINTS,
+                      vmax_model: VmaxFactorized,
+                      H_preview=10, mu_default=0.8, speed_limit=None):
+    """
+    Pure-Pursuit用に、Envと独立に OBS_V2(19次元) を生成
+    """
+    # ego座標でのターゲット相対位置
+    dx, dy = target_wp - pos_xy
+    target_yaw = math.atan2(dy, dx)
+
+    # セグメント方向
+    segment = target_next_wp - target_wp
+    # ヘディング誤差（-pi..pi）
+    heading_error = (target_yaw - yaw + np.pi) % (2*np.pi) - np.pi
+
+    # CTE 近似（方向ベクトル内積から）
+    tdir = (target_wp - pos_xy); tdir = tdir / (np.linalg.norm(tdir) + 1e-9)
+    sdir = segment / (np.linalg.norm(segment) + 1e-9)
+    perp_error = 1.0 - float(np.dot(tdir, sdir))
+    # 初手だけ無視する等のルールは上位で適用可
+
+    # ego変換
+    target_wp_relative_x =  math.cos(yaw)*dx + math.sin(yaw)*dy
+    target_wp_relative_y = -math.sin(yaw)*dx + math.cos(yaw)*dy
+
+    yaw_sin, yaw_cos = math.sin(yaw), math.cos(yaw)
+
+
+    assert H_preview >= 1, f"H_preview must be >=1, got {H_preview}"
+    assert WAYPOINTS is not None and len(WAYPOINTS) >= 3, f"WAYPOINTS too short: {len(WAYPOINTS) if WAYPOINTS is not None else None}"
+    assert isinstance(waypoint_idx, int) and 0 <= waypoint_idx < len(WAYPOINTS), f"bad waypoint_idx={waypoint_idx}"
+    assert waypoint_direc in (-1, 1), f"bad waypoint_direc={waypoint_direc}"
+
+    # 先読み κ と vmax
+    kappas_H, ds_H = curvature_from_wps(WAYPOINTS, waypoint_idx, waypoint_direc, H_preview)
+    mus_H = [mu_default]*len(kappas_H)
+    mu_local = mus_H[0] if mus_H else mu_default
+    kappa_local = float(kappas_H[0]) if kappas_H else 0.0
+
+    vmax_local = float(vmax_model.from_kappa(kappa_local, mu_local))
+    vmax_preview = vmax_model.batch_kappa(kappas_H, mus_H) if len(kappas_H) else np.array([vmax_local], np.float32)
+
+    vmax_min_hH   = float(np.min(vmax_preview))
+    vmax_mean_hH  = float(np.mean(vmax_preview))
+    vmax_slope_hH = float((vmax_preview[-1] - vmax_preview[0]) / max(1, len(vmax_preview)-1)) if len(vmax_preview)>=2 else 0.0
+
+    v_ratio  = float(vel) / (vmax_local + 1e-3)
+    headroom = vmax_local - float(vel)
+
+    limit_v_target = float(min(speed_limit if speed_limit is not None else float("inf"), vmax_min_hH))
+
+    obs = np.array([
+        target_wp_relative_x, target_wp_relative_y, float(pos_xy[0]), float(pos_xy[1]),
+        yaw_sin, yaw_cos, float(vel), float(perp_error), float(heading_error), float(passed),
+        float(kappa_local), float(mu_local), float(vmax_local), float(v_ratio), float(headroom),
+        float(vmax_min_hH), float(vmax_mean_hH), float(vmax_slope_hH), float(limit_v_target)
+    ], dtype=np.float32)
+    return obs
+
+
 # === 行動クローンモデルの読み込み ===
 
 
@@ -509,6 +588,16 @@ def run_control_loop(scene, car,sphere,bc_model):
     debug_arrow_target = None
     debug_arrow_plans = [None,None,None]
 
+    #ボトルネック認識とVmax魂の注入 3.2 
+    vmax_model = VmaxFactorized(
+        model_path="pre_training/models/vmax_factorized.pt",
+        scaler_path="pre_training/models/scaler_factorized.npz",
+        g=9.80665, safety=0.85, r_clip=1000.0, device="cpu"
+    )
+    H_PREVIEW = 10
+    MU_DEFAULT = 0.8
+    SPEED_LIMIT = None  # 実装あれば数値を入れて min 取る
+
 # ----- 制御ループ（例: Genesis4D の step() 内など） -----
     for step in range(20_0000):
 
@@ -644,22 +733,55 @@ def run_control_loop(scene, car,sphere,bc_model):
 
             # ───────────
             # 8) 車速 PID
-            speed_error = TARGET_SPEED - car_speed
-            integ_speed_error += speed_error * scene.dt
-            throttle = KP_SPEED * speed_error + KI_SPEED * integ_speed_error
-            # Clip しておく
-            throttle = max(-FORCE_CLIP, min(FORCE_CLIP, throttle))
+
+#ボトルネック認識とVmax魂の注入 アクセルが負の数値になる
+
+            # 目標速度（vmax と連携するなら min(TARGET_SPEED_BASE, limit_v_target) を使う）
+            v_ref = TARGET_SPEED
+            # PI（アンチワインドアップ付き）
+            speed_error = v_ref - car_speed
+            # 飽和前のコントロール
+            u_raw = KP_SPEED * speed_error + KI_SPEED * integ_speed_error
+            # 物理域で飽和（前進のみ＝非負）
+            u_sat = max(0.0, min(FORCE_CLIP, u_raw))
+            # ★アンチワインドアップ（条件付き積分：飽和時は誤差が飽和方向に押しているときだけ積分）
+            allow_integrate = (
+                (0.0 < u_raw < FORCE_CLIP) or
+                (u_raw >= FORCE_CLIP and speed_error < 0) or
+                (u_raw <= 0.0      and speed_error > 0)
+            )
+            if allow_integrate:
+                integ_speed_error += speed_error * scene.dt
+            throttle = u_sat
+            # 発進補助（停止近傍で最小トルク）
+            if abs(car_speed) < 0.1 and throttle < 0.05 * FORCE_CLIP:
+                throttle = 0.05 * FORCE_CLIP
+#            speed_error = TARGET_SPEED - car_speed
+#            integ_speed_error += speed_error * scene.dt
+#            throttle = KP_SPEED * speed_error + KI_SPEED * integ_speed_error
+#            # Clip しておく
+#            throttle = max(-FORCE_CLIP, min(FORCE_CLIP, throttle))
 
             # 観測データ
             is_first = True if waypoint_idx==start_waypoint_idx else False
 
-            obs = get_obs(car_pos=pos_xy
-                          ,car_vel=car_speed
-                          ,car_yaw=yaw
-                          ,target_wp=target_wp
-                          ,target_next_wp=target_next_wp
-                          ,passed=passed
-                          ,is_first_check_point=is_first)
+#ボトルネック認識とVmax魂の注入 3.2 
+            obs = build_obs_v2_pure(
+                pos_xy=pos_xy, yaw=yaw, vel=car_speed, passed=passed,
+                target_wp=target_wp, target_next_wp=target_next_wp,
+                waypoint_idx=waypoint_idx, waypoint_direc=waypoint_direc,
+                WAYPOINTS=WAYPOINTS,
+                vmax_model=vmax_model,
+                H_preview=H_PREVIEW, mu_default=MU_DEFAULT, speed_limit=SPEED_LIMIT
+            )
+#            obs = get_obs(car_pos=pos_xy
+#                          ,car_vel=car_speed
+#                          ,car_yaw=yaw
+#                          ,target_wp=target_wp
+#                          ,target_next_wp=target_next_wp
+#                          ,passed=passed
+#                          ,is_first_check_point=is_first)
+
             # 報酬
             reward = compute_reward(obs=obs,t=t)
             reward_total += reward
@@ -701,33 +823,47 @@ def run_control_loop(scene, car,sphere,bc_model):
                         vec=(segment_plan_x, segment_plan_y, 0.0),
                         radius=0.005, color=(0, 1, 1, 0.5))  # LightBlue
 
-            # 教師データ記録（plan_x*, plan_y* を追加）
-            data_log.append({
-                # 環境
-                "target_wp_x": obs[0],# target_wp[0],# ９次元に拡張し順序を合わせる
-                "target_wp_y": obs[1],  #target_wp[1],# ９次元に拡張し順序を合わせる
-                "pos_x": obs[2],        #pos_xy[0],
-                "pos_y": obs[3],        #pos_xy[1],
-                # 断続しないヨー角 １０次元に    
-                "yaw_sin": obs[4],          #yaw,
-                "yaw_cos": obs[5],          #yaw,
-                "velocity": obs[5+1],     #car_speed,
-                "perp_error":obs[6+1],    #0.0,           # ９次元に拡張し順序を合わせる
-                "heading_error":obs[7+1], #0.0,        # ９次元に拡張し順序を合わせる
-                "passed":obs[8+1],        #0.0,               # ９次元に拡張し順序を合わせる
-                # 出力
-                "steer_angle": steer_angle,
-                "throttle": throttle,       
-                # 報酬
-#計画と行動のマルチタスクモデル　教師データに計画を入れる
-                "reward": reward,       # ← ステップ報酬（学習に使う）
-                "reward_total": reward,  # ← 参考：累積（解析用）                
-                # 計画（ego座標の将来点; M=3 固定）
-                "plan_x1": plan_xy[0], "plan_y1": plan_xy[1],
-                "plan_x2": plan_xy[2], "plan_y2": plan_xy[3],
-                "plan_x3": plan_xy[4], "plan_y3": plan_xy[5],                
-#                "reward": reward       
+
+#ボトルネック認識とVmax魂の注入 3.3 記録
+            # ★ 教師データ記録（OBS_V2 固定順＋出力＋報酬＋計画）
+            row = dict(zip(OBS_V2_KEYS, obs.tolist()))
+            row.update({
+                "steer_angle": float(steer_angle),
+                "throttle": float(throttle),
+                "reward": float(reward),
+                "reward_total": float(reward_total),
+                "plan_x1": float(plan_xy[0]), "plan_y1": float(plan_xy[1]),
+                "plan_x2": float(plan_xy[2]), "plan_y2": float(plan_xy[3]),
+                "plan_x3": float(plan_xy[4]), "plan_y3": float(plan_xy[5]),
             })
+            data_log.append(row)
+#            # 教師データ記録（plan_x*, plan_y* を追加）
+#            data_log.append({
+#                # 環境
+#                "target_wp_x": obs[0],# target_wp[0],# ９次元に拡張し順序を合わせる
+#                "target_wp_y": obs[1],  #target_wp[1],# ９次元に拡張し順序を合わせる
+#                "pos_x": obs[2],        #pos_xy[0],
+#                "pos_y": obs[3],        #pos_xy[1],
+#                # 断続しないヨー角 １０次元に    
+#                "yaw_sin": obs[4],          #yaw,
+#                "yaw_cos": obs[5],          #yaw,
+#                "velocity": obs[5+1],     #car_speed,
+#                "perp_error":obs[6+1],    #0.0,           # ９次元に拡張し順序を合わせる
+#                "heading_error":obs[7+1], #0.0,        # ９次元に拡張し順序を合わせる
+#                "passed":obs[8+1],        #0.0,               # ９次元に拡張し順序を合わせる
+#                # 出力
+#                "steer_angle": steer_angle,
+#                "throttle": throttle,       
+#                # 報酬
+##計画と行動のマルチタスクモデル　教師データに計画を入れる
+#                "reward": reward,       # ← ステップ報酬（学習に使う）
+#                "reward_total": reward,  # ← 参考：累積（解析用）                
+#                # 計画（ego座標の将来点; M=3 固定）
+#                "plan_x1": plan_xy[0], "plan_y1": plan_xy[1],
+#                "plan_x2": plan_xy[2], "plan_y2": plan_xy[3],
+#                "plan_x3": plan_xy[4], "plan_y3": plan_xy[5],                
+##                "reward": reward       
+#            })
 
         # 一周したらおわり
         if waypoint_idx == end_waypoint_idx or rest_time < 0.0:

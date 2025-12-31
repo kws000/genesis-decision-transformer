@@ -31,6 +31,13 @@ import numpy as np
 #計画と行動のマルチタスクモデル
 from typing import Optional, Tuple
 
+#ボトルネック認識とVmax魂の注入
+from pre_training.laws.laws_vmax_infer import VmaxFactorized
+
+#ボトルネック認識とVmax魂の注入 3.1 obsビルダー
+# genesis_gym_env.py
+from geo_utils import curvature_from_wps
+
 
 ## プロンプト生成で町を作る
 #from genesis import generate_scene_from_prompt
@@ -135,6 +142,7 @@ class GenesisScene:
         self.debug_arrow_target = None
         self.debug_arrow_plan = None
 
+        self.debug_plan_arrows = []
 
         self.lock = threading.Lock()
         self.kick_step = False
@@ -149,6 +157,9 @@ class GenesisScene:
         self.dt = self.scene.dt
 
         self.reward_total = 0.0
+
+        #ボトルネック認識とVmax魂の注入
+        self.vmax_model = VmaxFactorized(g=9.80665, safety=0.85, r_clip=1000.0, device="cpu")
 
     # === 安定ステップを自動判定 ===
 
@@ -424,6 +435,9 @@ class GenesisScene:
 #            time.sleep(1)  # Viewerが起動するまで待つ
 #            pyautogui.press('d')  # ワイヤーフレームトグル
 
+#        #ボトルネック認識とVmax魂の注入
+#        self.vmax_model = VmaxFactorized(g=9.80665, safety=0.85, r_clip=1000.0, device="cpu")
+
         return self._get_obs()
 
     # 強化学習ライブラリ側から呼ばれる
@@ -533,29 +547,53 @@ class GenesisScene:
         wy = s * pts[:, 0] + c * pts[:, 1] + pos_xy[1]
         return np.stack([wx, wy], axis=1)  # (M,2)
 
-    def debug_draw_plan_xy(self,debug_plan_xy):
-        
-        # 車体位置・姿勢の取得（GenesisScene側のプロパティ名に合わせてください）
-        car_pos_xy = np.array(self.car.get_dofs_position())[:2]
+    def debug_draw_plan_xy(self, plan_xy_1d):
+        """
+        plan_xy_1d: shape (2M,) の 1D 配列（ego座標: [x1,y1,x2,y2,...]）
+        """
+        import math
+        import numpy as np
 
-        quat = self.car.get_links_quat()[0]  # chassisの回転（w, x, y, z）
-        siny_cosp = 2 * (quat[0]*quat[3] + quat[1]*quat[2])
-        cosy_cosp = 1 - 2 * (quat[2]**2 + quat[3]**2)
-        car_yaw = math.atan2(siny_cosp, cosy_cosp)
+        arr = np.asarray(plan_xy_1d, dtype=np.float32).reshape(-1)
+        assert arr.size % 2 == 0, "plan shape must be (2M,)"
 
-        plan_xy_world = self.ego_to_world_batch(debug_plan_xy, car_pos_xy, car_yaw)  # (M,2)
+        M = arr.size // 2
+        if M < 2:
+            return  # 線分が作れない
 
-        vec_x = plan_xy_world[0] - car_pos_xy[0]
-        vec_y = plan_xy_world[1] - car_pos_xy[1]
+        pts_ego = arr.reshape(M, 2)  # (M,2)
 
-        # Debug arrow
-        if self.debug_arrow_plan is not None:
-            self.scene.clear_debug_object(self.debug_arrow_plan)
+        # 車の現在姿勢（world）
+        pos_xy = np.array(self.car.get_dofs_position()[:2], np.float32)  # (2,)
+        quat   = self.car.get_links_quat()[0]  # (w,x,y,z)
+        siny_cosp = 2*(quat[0]*quat[3] + quat[1]*quat[2])
+        cosy_cosp = 1 - 2*(quat[2]**2 + quat[3]**2)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
 
-        self.debug_arrow_plan = self.scene.draw_debug_arrow(
-                pos=(car_pos_xy[0], car_pos_xy[1], 0.1),
-                vec=(vec_x, vec_y, 0.0),
-                radius=0.005, color=(0, 1, 1, 0.5))  # LightBlue
+        # ego → world 変換
+        c, s = math.cos(yaw), math.sin(yaw)
+        R = np.array([[c, -s],
+                    [s,  c]], dtype=np.float32)
+        pts_world = pos_xy + pts_ego @ R.T  # (M,2)
+
+        # 複数本の矢印を 1 本ずつ描く（vec は (3,) のフラットな float タプル）
+        for debug_plan_arrow in self.debug_plan_arrows:
+            self.scene.clear_debug_object(debug_plan_arrow)
+
+        self.debug_plan_arrows.clear()
+
+        for i in range(M - 1):
+            src = pts_world[i]
+            dst = pts_world[i + 1]
+            v = dst - src  # (2,)
+
+            debug_obj = self.scene.draw_debug_arrow(
+                pos=(float(src[0]), float(src[1]), 0.10),
+                vec=(float(v[0]),   float(v[1]),   0.00),
+                radius=0.005,
+                color=(0.0, 1.0, 1.0, 0.5),
+            )
+            self.debug_plan_arrows.append(debug_obj)
 
     def _get_obs(self):
 
@@ -672,9 +710,78 @@ class GenesisScene:
 
         car_yaw_sin,car_yaw_cos = yaw_to_sin_cos(yaw)
 
-#計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
-        return np.array([target_wp_relative_x, target_wp_relative_y, pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
-#        return np.array([target_wp[0], target_wp[1], pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
+#ボトルネック認識とVmax魂の注入
+
+        # --- _get_obs() 内：VMAX 系観測を作る安全な順序 ---
+
+        # 1) 先読み長を決定
+        H = int(getattr(self, "H_preview", 20))
+        assert H >= 1, f"H_preview must be >=1 (got {H})"
+
+        # 2) 先読みの曲率列と区間長を計算（スカラーを返す実装にしておく）
+#共通化
+        kappas_H, ds_H = curvature_from_wps(self.waypoints, self.waypoint_idx, self.waypoint_direc, H)
+#        kappas_H, ds_H = self._curvature_from_wps(self.waypoint_idx, self.waypoint_direc, H)
+
+        # 形の揺れ対策：必ず 1D float 配列へ
+        kappas_H = np.asarray(kappas_H, dtype=np.float32).reshape(-1)
+        assert kappas_H.size >= 1, "curvature list must be non-empty"
+
+        # 3) μ（路面摩擦）列を用意（当面は固定。将来は路面タグから取得）
+        mu_default = getattr(self, "mu_default", 0.8)
+        mus_H = np.full_like(kappas_H, fill_value=float(mu_default), dtype=np.float32)
+
+        # 4) 局所値を決定
+        kappa_local = float(kappas_H[0])
+        mu_local    = float(mus_H[0])
+
+        # 5) 学習済み v_max モデルで推論（単点 & 先読み列）
+        vmax_local   = float(self.vmax_model.from_kappa(kappa_local, mu_local))       # 単点
+        vmax_preview = np.asarray(self.vmax_model.batch_kappa(kappas_H, mus_H), np.float32)  # (H,)
+
+        # 6) 先読みから要約量
+        if vmax_preview.size >= 2:
+            vmax_min_hH   = float(np.min(vmax_preview))
+            vmax_mean_hH  = float(np.mean(vmax_preview))
+            vmax_slope_hH = float((vmax_preview[-1] - vmax_preview[0]) / (vmax_preview.size - 1))
+        else:
+            vmax_min_hH = vmax_mean_hH = float(vmax_local)
+            vmax_slope_hH = 0.0
+
+        # 7) 制限速度と統合（現状は∞→ v_max_min がそのままターゲット）
+        speed_limit    = float("inf")   # TODO: マップ側から取得
+        limit_v_target = float(min(speed_limit, vmax_min_hH))
+
+        # 8) 既存10次元（obs10）を先に構築してある前提
+        #   obs10 = np.array([target_wp_relative_x, target_wp_relative_y, pos[0], pos[1],
+        #                     car_yaw_sin, car_yaw_cos, vel, perp_error, heading_error, passed], np.float32)
+        # --- 既存の10次元をまず作る（あなたの既存コード） ---
+        obs10 = np.array([
+            target_wp_relative_x, target_wp_relative_y, pos[0], pos[1],
+            car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error, passed
+        ], dtype=np.float32)
+
+        # 9) 追加9次元（VMAX塊）
+        obs_extra = np.array([
+            kappa_local, mu_local, vmax_local,
+            float(vel) / (vmax_local + 1e-3),          # v_ratio
+            vmax_local - float(vel),                   # headroom
+            vmax_min_hH, vmax_mean_hH, vmax_slope_hH,
+            limit_v_target
+        ], dtype=np.float32)
+
+        # 10) （任意）デバッグ／学習用のキャッシュ
+        self._cache_kappas_H = kappas_H.astype(np.float32, copy=False)
+        self._cache_ds_H     = np.asarray(ds_H, np.float32)
+        self._cache_vmax_H   = vmax_preview
+
+        # 11) 連結して OBS_V2(19次元) を返す
+        obs_v2 = np.concatenate([obs10, obs_extra], axis=0)   # shape=(19,)
+        return obs_v2
+#
+##計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
+#        return np.array([target_wp_relative_x, target_wp_relative_y, pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
+##        return np.array([target_wp[0], target_wp[1], pos[0], pos[1], car_yaw_sin,car_yaw_cos, vel, perp_error, heading_error,passed], dtype=np.float32)
 
 
 #計画と行動のマルチタスクモデル

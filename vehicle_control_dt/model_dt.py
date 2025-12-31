@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -11,6 +13,7 @@ from typing import Optional, Tuple, List
 
 # パラメータ
 TIMESTEP_MAX = 4000
+
 
 # アテンションマップの可視化
 class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
@@ -574,7 +577,7 @@ class DecisionTransformer_Step8(nn.Module):
 class DecisionTransformer(nn.Module):
 
     #※ timestep_vocab は TIMESTEP_MAX 以上の2の乗数で
-    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, wp_dim: int = 5):
+    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = 0.8, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
 #   def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
   
         super().__init__()
@@ -590,7 +593,7 @@ class DecisionTransformer(nn.Module):
         self.wp_dim = wp_dim
 
 
-#計画と行動のマルチタスクモデル
+        #計画と行動のマルチタスクモデル
         self.embed_timestep = nn.Embedding(timestep_vocab, embed_dim)
 #        self.embed_timestep = nn.Embedding(timestep_max, embed_dim)
         
@@ -598,11 +601,20 @@ class DecisionTransformer(nn.Module):
         self.embed_state    = nn.Linear(obs_dim, embed_dim)
         self.embed_action   = nn.Linear(act_dim, embed_dim)
 
-#計画と行動のマルチタスクモデル WPプレフィクス用の埋め込み（dx,dy,s,κ,width）
+        #計画と行動のマルチタスクモデル WPプレフィクス用の埋め込み（dx,dy,s,κ,width）
         self.embed_wp = nn.Linear(wp_dim, embed_dim)
 
         self.dropout        = nn.Dropout(0.1)
 
+        #ボトルネック認識とVmax魂の注入 1.1型埋め込み（state/action/rtg を識別して注意の分業を誘導)
+        self.embed_type = nn.Embedding(num_embeddings=4, embedding_dim=embed_dim)
+        self.type_state_with_vmax = 1
+        self.type_action = 2
+        self.type_rtg    = 3
+
+        self.force_clip = force_clip
+        self.idle_throttle_init = idle_throttle_init
+        self._probe_force = True
 
 #計画と行動のマルチタスクモデル
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=n_head, batch_first=True)
@@ -623,6 +635,15 @@ class DecisionTransformer(nn.Module):
             self.focus_head = None
 #       self.predict_action = nn.Sequential(nn.Linear(embed_dim, act_dim))
 
+
+		#ボトルネック認識とVmax魂の注入 アクセルが負の数値になる 最後に：fresh 初期化として throttle 側バイアスを設定 ---
+        # idle を [0, force_clip] → p∈(0,1) に正規化して logit
+        p = max(1e-6, min(1 - 1e-6, self.idle_throttle_init / self.force_clip))
+        b = math.log(p / (1 - p))
+        with torch.no_grad():
+            if self.act_dim >= 2:  # [steer, throttle] 前提
+                self.predict_action.bias[0].zero_()  # steer 側は 0 初期化
+                self.predict_action.bias[1].fill_(b) # throttle 側を logit(idle/F) に
 
 #計画と行動のマルチタスクモデル
         # ---- attention capture (hook方式) ----
@@ -740,18 +761,26 @@ class DecisionTransformer(nn.Module):
         B, T, _ = states.shape
 #       B, T = states.shape[0], states.shape[1]
 
+#ボトルネック認識とVmax魂の注入 1.2 forward：型埋め込みを加算＋安全チェック
+        # 形の安全チェック（obs拡張後は 19 次元が期待）
+        if states.shape[-1] != self.obs_dim:
+            raise RuntimeError(f"[DecisionTransformer] obs_dim mismatch: got {states.shape[-1]} but model expects {self.obs_dim}")
+
         if timesteps.ndim == 3:
             timesteps = timesteps.squeeze(-1)
 
         time_emb   = self.embed_timestep(timesteps)
 
 #計画と行動のマルチタスクモデル
-        s_tok = self.embed_state(states) + time_emb
-        a_tok = self.embed_action(actions) + time_emb
-        r_tok = self.embed_return(returns) + time_emb
-#       state_emb  = self.embed_state(states) + time_emb
-#       action_emb = self.embed_action(actions) + time_emb
-#       return_emb = self.embed_return(returns_to_go) + time_emb
+
+#ボトルネック認識とVmax魂の注入 1.2 forward：型埋め込みを加算＋安全チェック
+        s_tok = self.embed_state(states) + time_emb + self.embed_type.weight[self.type_state_with_vmax]
+        a_tok = self.embed_action(actions) + time_emb + self.embed_type.weight[self.type_action]
+        r_tok = self.embed_return(returns) + time_emb + self.embed_type.weight[self.type_rtg]
+#        s_tok = self.embed_state(states) + time_emb
+#        a_tok = self.embed_action(actions) + time_emb
+#        r_tok = self.embed_return(returns) + time_emb
+
 
 #計画と行動のマルチタスクモデル
         x_time = torch.stack([s_tok, a_tok, r_tok], dim=2).reshape(B, 3*T, self.embed_dim)
@@ -774,7 +803,23 @@ class DecisionTransformer(nn.Module):
         # 位置: [wp:0..K-1] + [state,action,rtg]xT ⇒ action位置は K + (1 + 3*t)
         action_positions = K + (1 + 3*torch.arange(T, device=states.device))
         h_act = h[:, action_positions, :]  # (B, T, D)
-        pred_actions = self.predict_action(h_act)  # (B, T, A)
+
+#ボトルネック認識とVmax魂の注入 アクセルが負の数値になる 非負制約 スケール調整
+        raw = self.predict_action(h_act)            # (B, T, A=2) = [steer_raw, throttle_raw]
+
+        if getattr(self, "_probe_force", False):
+            self._probe_force = False
+            print("[FWD] force_clip attr =", getattr(self, "force_clip", None))
+            print("[FWD] using class =", self.__class__.__module__, self.__class__.__name__)
+            # ロジットから手計算（この forward のコード経由ではない）
+            test = torch.sigmoid(torch.tensor([[-2.0554783]], device=h_act.device)) * float(self.force_clip)
+            print("[FWD] test throttle (σ(-2.055)*force_clip) =", float(test))
+
+        steer = raw[..., 0:1]                       # ステアは線形のまま（必要なら後述の tanh も可）
+        throt = torch.sigmoid(raw[..., 1:2]) * self.force_clip  # [0, FORCE_CLIP]
+        pred_actions = raw#torch.cat([steer, throt], dim=-1)
+#        pred_actions = self.predict_action(h_act)  # (B, T, A)
+
         pred_plan = None
         alpha = None
         if return_plan:
