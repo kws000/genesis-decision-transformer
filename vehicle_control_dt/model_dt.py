@@ -817,8 +817,10 @@ class DecisionTransformer(nn.Module):
 
         steer = raw[..., 0:1]                       # ステアは線形のまま（必要なら後述の tanh も可）
         throt = torch.sigmoid(raw[..., 1:2]) * self.force_clip  # [0, FORCE_CLIP]
-        pred_actions = raw#torch.cat([steer, throt], dim=-1)
-#        pred_actions = self.predict_action(h_act)  # (B, T, A)
+#アクセルがマイナスになる原因        
+        pred_actions = torch.cat([steer, throt], dim=-1)
+#        pred_actions = raw#torch.cat([steer, throt], dim=-1)
+##        pred_actions = self.predict_action(h_act)  # (B, T, A)
 
         pred_plan = None
         alpha = None

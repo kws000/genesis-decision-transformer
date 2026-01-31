@@ -500,8 +500,10 @@ def compute_reward(obs,t):
     # 基本報酬：速度を奨励しつつ、軌道逸脱を罰する
 
     speed = speed * math.cos(he)
-    # いやだけどこうしないとスピード狂がどうにもやめられない
-    speed = 20.0 if speed > 20.0 else speed 
+
+#ボトルネック認識とVmax魂の注入 早い程良いに決まってるので戻す
+#    # いやだけどこうしないとスピード狂がどうにもやめられない
+#    speed = 20.0 if speed > 20.0 else speed 
 
     # 追加の報酬修正
     time_bonus_max = 30.0 # 30秒以上なら報酬なし

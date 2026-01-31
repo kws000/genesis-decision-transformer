@@ -236,6 +236,7 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
                 ts_tensor, obs_tensor, act_tensor, rtg_tensor,
                 wp=wp_tensor, return_plan=True, return_focus=False
             )
+            
             action = action_pred[0, -1].cpu().numpy()
 
 #ボトルネック認識とVmax魂の注入 7.8 行動クリップ（環境の許容範囲に合わせて調整）
@@ -249,7 +250,8 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
                     debug_plan_xy = plan_hat[0, -1].cpu().numpy()   # (2M,)
                 else:
                     debug_plan_xy = plan_hat[0].cpu().numpy()       # (2M,)
-                env.scene.debug_draw_plan_xy(debug_plan_xy)
+#                env.scene.debug_draw_plan_xy(debug_plan_xy)
+                env.scene.debug_draw_plan_compare(debug_plan_xy)
 
         # step: Gymnasium専用（5タプル）
         obs, reward, terminated, truncated, info = env.step(action)

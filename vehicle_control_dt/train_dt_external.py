@@ -18,7 +18,7 @@ CHECKPOINT_DIR = "checkpoints"
 #計画と行動のマルチタスクモデル
 BATCH_SIZE = 64
 LR = 1e-3
-EPOCHS = 10#30 #50 #※いまだけ削減
+EPOCHS = 20#30 #50 #※いまだけ削減
 K_WP = 40
 PLAN_M = 3
 W_ACT = 1.0
@@ -157,6 +157,7 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
             states    = states.to(DEVICE).float()
             actions   = actions.to(DEVICE).float()
             returns   = returns.to(DEVICE).float()
+
 #ボトルネック認識とVmax魂の注入 6.1 WPなしガード（K=0 のケース） 
             wp_in = None
             if wp is not None:
@@ -175,6 +176,7 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
 
 #ボトルネック認識とVmax魂の注入 アクセルが負の数値になる zscore廃止
             w = weight_from_returns(returns, floor=0.2).expand_as(actions)
+            #教師アクションと予測アクションの差が行動損失
             L_act = (w * (pred_actions - actions) ** 2).mean()
 #            w = _zscore_nonneg(returns)  # (B,T,1)
 #            w = w.expand_as(actions)     # (B,T,2)
@@ -188,10 +190,12 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
                 L_plan = torch.zeros((), device=DEVICE)
             else:            
                 plan = plan.to(DEVICE).float()  # (B,2M)
-                L_plan = mse(pred_plan, plan)
+                #教師計画と予測計画の差が計画損失
+                L_plan = mse(pred_plan, plan)   
 
             # 滑らかさ損失（Δa）
             if pred_actions.shape[1] > 1:
+                #予測アクセルと前回予測アクセルの差が滑らか損失
                 da = pred_actions[:, 1:, :] - pred_actions[:, :-1, :]
                 L_smooth = (da ** 2).mean()
             else:
@@ -213,6 +217,7 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
 #            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth
 
             optimizer.zero_grad()
+            # 全損失から誤差逆伝搬を行い、勾配を調整する
             loss.backward()
 
             #ボトルネック認識とVmax魂の注入 6.2 安全余裕損失 L_sm（速度上限超過時のみアクセルを監督）

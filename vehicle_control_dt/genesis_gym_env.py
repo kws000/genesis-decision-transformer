@@ -158,6 +158,8 @@ class GenesisScene:
 
         self.reward_total = 0.0
 
+        self.zero_throttle_time = 0.0
+
         #ボトルネック認識とVmax魂の注入
         self.vmax_model = VmaxFactorized(g=9.80665, safety=0.85, r_clip=1000.0, device="cpu")
 
@@ -430,6 +432,8 @@ class GenesisScene:
         # 報酬リセット
         self.reward_total = 0.0
 
+        self.zero_throttle_time = 0.0
+
 #        # 最初からワイヤーにしたい
 #        if self.scene.viewer is not None:
 #            time.sleep(1)  # Viewerが起動するまで待つ
@@ -456,6 +460,9 @@ class GenesisScene:
 
         # コマンド実行
         self.car.control_dofs_position([steer]*2, idx_steer)
+#        #＊なんでアクセルゼロなのに前に進む？   
+#        print(f"control_dofs_force throttle={throttle}")
+
         self.car.control_dofs_force([throttle]*2, idx_wheels)
 
         # 高速モードではviewを使わない
@@ -488,6 +495,10 @@ class GenesisScene:
 #        elif self.is_off_track(obs):
 #            reward -= 1.0  # 罰として明確に伝える
 #            #回復の見込みが普通にあるので終了niacinamide
+        elif self.t > 10.0 and self.reward_total <= 0:
+            # 成功の可能性が低い
+            reward -= 1000
+            done = True            
         elif self.t > 60.0:
             # 時間かかりすぎ終了
             reward -= 1000
@@ -499,6 +510,17 @@ class GenesisScene:
         elif self.reward_total < -250:
             # 大きく損失していてもう回復が見込みめない
             done = True
+        elif self.zero_throttle_time > 10.0:
+            # ずっとアクセルを踏んでいない
+            reward -= 10
+#            done = True
+
+        # アクセルを踏んでいない時間
+        if throttle <=0.0:
+            self.zero_throttle_time += self.t
+        else:
+            self.zero_throttle_time = 0.0
+            
 
         self.reward_total += reward
 
@@ -546,6 +568,92 @@ class GenesisScene:
         wx = c * pts[:, 0] - s * pts[:, 1] + pos_xy[0]
         wy = s * pts[:, 0] + c * pts[:, 1] + pos_xy[1]
         return np.stack([wx, wy], axis=1)  # (M,2)
+
+
+
+    def _get_pose_world_xy_yaw(self):
+        """chassisリンクから位置(x,y)とyawを一貫フレームで取得"""
+        import math, numpy as np
+        pos_w = np.array(self.car.get_links_pos()[0], dtype=np.float32)  # (x,y,z) world
+        quat  = self.car.get_links_quat()[0]  # (w,x,y,z)
+        w,x,y,z = quat
+        siny_cosp = 2*(w*z + x*y)
+        cosy_cosp = 1 - 2*(y*y + z*z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        return pos_w[:2], yaw
+
+    def _ego_to_world(self, pts_ego_xy, pos_world_xy, yaw):
+        """pts_ego_xy: (N,2), pos_world_xy: (2,), yaw[rad]"""
+        import numpy as np, math
+        c, s = math.cos(yaw), math.sin(yaw)
+        R = np.array([[c, -s],
+                    [s,  c]], dtype=np.float32)  # x前方, y左を仮定
+        return pos_world_xy + pts_ego_xy @ R.T
+
+    def debug_draw_plan_compare(self, plan_pred_1d, plan_gt_1d=None):
+        """
+        plan_pred_1d: (2M,) 予測計画（ego座標）
+        plan_gt_1d:  (2M,) GT計画（ego座標）※任意
+        worldに変換して線分を描く
+        """
+        import numpy as np
+        plan_pred = np.asarray(plan_pred_1d, np.float32).reshape(-1)
+        assert plan_pred.size % 2 == 0, "plan_pred must be (2M,)"
+        P_pred = plan_pred.reshape(-1, 2)  # (M,2)
+
+        P_gt = None
+        if plan_gt_1d is not None:
+            arr_gt = np.asarray(plan_gt_1d, np.float32).reshape(-1)
+            assert arr_gt.size % 2 == 0, "plan_gt must be (2M,)"
+            P_gt = arr_gt.reshape(-1, 2)  # (M,2)
+
+        # 一貫フレームで pose を取得
+        pos_xy, yaw = self._get_pose_world_xy_yaw()
+
+        # ego→world
+        W_pred = self._ego_to_world(P_pred, pos_xy, yaw)  # (M,2)
+        W_gt   = self._ego_to_world(P_gt,   pos_xy, yaw) if P_gt is not None else None
+
+        # まず既存の矢印をクリア（必要なら保持して個別に消す）
+        try:
+            if getattr(self, "_dbg_arrows_pred", None):
+                for h in self._dbg_arrows_pred: self.scene.clear_debug_object(h)
+            if getattr(self, "_dbg_arrows_gt", None):
+                for h in self._dbg_arrows_gt: self.scene.clear_debug_object(h)
+        except Exception:
+            pass
+        self._dbg_arrows_pred, self._dbg_arrows_gt = [], []
+
+        # 予測（シアン）
+        for i in range(max(0, W_pred.shape[0]-1)):
+            src = W_pred[i]; dst = W_pred[i+1]; vec = dst - src
+            h = self.scene.draw_debug_arrow(
+                pos=(float(src[0]), float(src[1]), 0.10),
+                vec=(float(vec[0]), float(vec[1]), 0.00),
+                radius=0.005, color=(0.0, 1.0, 1.0, 0.6) # cyan
+            )
+            self._dbg_arrows_pred.append(h)
+
+        # GT（青）
+        if W_gt is not None:
+            for i in range(max(0, W_gt.shape[0]-1)):
+                src = W_gt[i]; dst = W_gt[i+1]; vec = dst - src
+                h = self.scene.draw_debug_arrow(
+                    pos=(float(src[0]), float(src[1]), 0.10),
+                    vec=(float(vec[0]), float(vec[1]), 0.00),
+                    radius=0.005, color=(0.0, 0.0, 1.0, 0.6) # blue
+                )
+                self._dbg_arrows_gt.append(h)
+
+        # --- 最小自己診断（座標変換の健全性チェック） ---
+        # ego の (1,0) → 車前方へ，(0,1) → 車左へ になっているか？
+        unit = np.array([[1,0],[0,1]], np.float32)
+        W_unit = self._ego_to_world(unit, pos_xy, yaw)
+        # 必要なら print して確認
+        # print(f"[DBG] yaw={yaw:.3f}  fwd_world={W_unit[0]-pos_xy}  left_world={W_unit[1]-pos_xy}")
+
+
+
 
     def debug_draw_plan_xy(self, plan_xy_1d):
         """
@@ -806,8 +914,9 @@ class GenesisScene:
         # 基本報酬：速度を奨励しつつ、軌道逸脱を罰する
 
         speed = speed * math.cos(he)
-        # いやだけどこうしないとスピード狂がどうにもやめられない
-        speed = 20.0 if speed > 20.0 else speed 
+#ボトルネック認識とVmax魂の注入 早い程良いに決まってるので戻す
+#        # いやだけどこうしないとスピード狂がどうにもやめられない
+#        speed = 20.0 if speed > 20.0 else speed 
 
         # 追加の報酬修正
         time_bonus_max = 30.0 # 30秒以上なら報酬なし
