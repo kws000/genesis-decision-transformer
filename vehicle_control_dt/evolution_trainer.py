@@ -177,6 +177,8 @@ def Evolution():
     if stable_step < 0:
         print(f"✅ 初回なので、全ての中間ファイルを削除")
         clean_all_intermediates()
+        #フォルダも消してる
+        os.makedirs("expert_data", exist_ok=True)
 
 
     # 前回までのスコアファイルと最終スコア値

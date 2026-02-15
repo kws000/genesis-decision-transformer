@@ -6,10 +6,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import argparse
 import pickle
+import pickle, numpy as np
 
 from model_dt import DecisionTransformer
 from convert_to_dt_format import TIMESTEP_MAX
 from train_dt import SequenceDataset  # または TrajectoryDataset
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -18,7 +20,7 @@ CHECKPOINT_DIR = "checkpoints"
 #計画と行動のマルチタスクモデル
 BATCH_SIZE = 64
 LR = 1e-3
-EPOCHS = 20#30 #50 #※いまだけ削減
+EPOCHS = 50 #※いまだけ削減
 K_WP = 40
 PLAN_M = 3
 W_ACT = 1.0
@@ -67,6 +69,14 @@ def weight_from_returns(returns, floor=0.2):
 #    z = (x - mu) / sd
 #    return torch.clamp(z, min=0.0)
 
+#前に進まなくなった直接の原因	非正規化計算のためにmeanとstdをロード
+def load_norm_pkl(norm_path):
+    with open(norm_path, "rb") as f:
+        s = pickle.load(f)
+    obs_mean = np.asarray(s["obs_mean"], np.float32)
+    obs_std  = np.asarray(s["obs_std"],  np.float32)
+    return obs_mean, obs_std
+
 
 #計画と行動のマルチタスクモデル
 def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_path,embed_dim=128):
@@ -81,6 +91,12 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
 
     #ボトルネック認識とVmax魂の注入 6.1 
     assert obs_dim == 19, f"obs_dim must be 19 (OBS_V2). got {obs_dim}"
+
+    #前に進まなくなった直接の原因	非正規化計算のためにmeanとstdをロード
+    obs_mean_np, obs_std_np = load_norm_pkl(norm_path)  # or load_norm_pkl
+    obs_mean_t = torch.tensor(obs_mean_np, device=DEVICE).view(1,1,-1)
+    obs_std_t  = torch.tensor(obs_std_np,  device=DEVICE).view(1,1,-1)
+
 
     # モデル定義
 
@@ -147,6 +163,8 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
 #   optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 #   loss_fn = nn.MSELoss()
 
+
+
     print("🚀 Training Start")
 
 #計画と行動のマルチタスクモデル
@@ -201,19 +219,40 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
             else:
                 L_smooth = torch.zeros((), device=DEVICE)
 
-#ボトルネック認識とVmax魂の注入 6.2 安全余裕損失 L_sm（速度上限超過時のみアクセルを監督）
-            # OBS_V2: vel=idx6, limit_v_target=idx18
-            vel  = states[..., 6]
-            vlim = states[..., 18]
-            delta = torch.clamp(vel - vlim, min=0.0)           # 超過量
-            accel_idx = 1  # action=[steer, accel]
-            # 減速度の目安（単純比例でOK）：過剰に強くしない
-            a_des = (-1.0 * delta / (vlim.abs() + 1e-3)).clamp(-1.0, 1.0)
-            mask = (delta > 0).float()
-            denom = mask.sum() + 1e-6
-            L_sm  = ((pred_actions[..., accel_idx] - a_des)**2 * mask).sum() / denom
 
-            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth + 0.2 * L_sm
+#前に進まなくなった直接の原因	非正規化
+            # states: (B,T,obs_dim) = obs_norm
+            states_phys = states * obs_std_t + obs_mean_t
+
+            vel_phys  = states_phys[..., 6]
+            vlim_phys = states_phys[..., 18]
+
+            vlim_phys = torch.clamp(vlim_phys, min=0.05)
+            delta = torch.clamp(vel_phys - vlim_phys, min=0.0)
+
+            eps = 0.05
+            mask = (delta > eps).float()
+
+            pred_th = pred_actions[..., 1]          # [0, force_clip]
+
+            denom = mask.sum() + 1e-6
+            L_sm = ((pred_th - 0.0)**2 * mask).sum() / denom
+
+##ボトルネック認識とVmax魂の注入 6.2 安全余裕損失 L_sm（速度上限超過時のみアクセルを監督）
+#            # OBS_V2: vel=idx6, limit_v_target=idx18
+#            vel  = states[..., 6]
+#            vlim = states[..., 18]
+#            delta = torch.clamp(vel - vlim, min=0.0)           # 超過量
+#            accel_idx = 1  # action=[steer, accel]
+#            # 減速度の目安（単純比例でOK）：過剰に強くしない
+#            a_des = (-1.0 * delta / (vlim.abs() + 1e-3)).clamp(-1.0, 1.0)
+#            mask = (delta > 0).float()
+#            denom = mask.sum() + 1e-6
+#            L_sm  = ((pred_actions[..., accel_idx] - a_des)**2 * mask).sum() / denom
+
+#前に進まなくなった直接の原因 L_sm の大きすぎが原因で減速している
+            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth + 0.0 * L_sm
+#            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth + 0.2 * L_sm
 #            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth
 
             optimizer.zero_grad()
@@ -228,15 +267,15 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
             total_loss += float(loss.item())
             avg_loss = total_loss / max(1, len(dataloader))
 
-#ボトルネック認識とVmax魂の注入 6.3 速度制約違反率（学習の健全性モニタ）
-            viol_rate = (vel > vlim).float().mean().item()
+#前に進まなくなった直接の原因	非正規化
+            viol_rate = (vel_phys > vlim_phys).float().mean().item()
+#            viol_rate = (vel > vlim).float().mean().item()
             print(
                 f"Epoch {epoch+1:03d} | L={avg_loss:.5f} "
                 f"| L_act={L_act.item():.4f} | L_plan={L_plan.item():.4f} "
                 f"| L_smooth={L_smooth.item():.4f} | L_sm={L_sm.item():.4f} "
                 f"| viol={viol_rate:.3f}"
             )
-#            print(f"Epoch {epoch+1:03d} | L={avg_loss:.5f} | L_act={L_act.item():.4f} | L_plan={L_plan.item():.4f} | L_sm={L_smooth.item():.4f}")
 
     # 保存
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)

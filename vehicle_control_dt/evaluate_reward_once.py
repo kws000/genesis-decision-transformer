@@ -236,7 +236,13 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
                 ts_tensor, obs_tensor, act_tensor, rtg_tensor,
                 wp=wp_tensor, return_plan=True, return_focus=False
             )
-            
+
+#前に進めない問題
+#            print("[CALL] fwd_id(model._probe) =", model._probe["fwd_id"])
+#            print("[CALL] probe pred_last      =", model._probe["pred_last"])
+#            print("[CALL] action_pred_last     =", action_pred[0,-1].detach().cpu().numpy())
+
+
             action = action_pred[0, -1].cpu().numpy()
 
 #ボトルネック認識とVmax魂の注入 7.8 行動クリップ（環境の許容範囲に合わせて調整）

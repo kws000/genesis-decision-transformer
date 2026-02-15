@@ -460,8 +460,8 @@ class GenesisScene:
 
         # コマンド実行
         self.car.control_dofs_position([steer]*2, idx_steer)
-#        #＊なんでアクセルゼロなのに前に進む？   
-#        print(f"control_dofs_force throttle={throttle}")
+
+#        print(f"推論時の control_dofs_force throttle={throttle}")
 
         self.car.control_dofs_force([throttle]*2, idx_wheels)
 
@@ -512,11 +512,13 @@ class GenesisScene:
             done = True
         elif self.zero_throttle_time > 10.0:
             # ずっとアクセルを踏んでいない
-            reward -= 10
+            reward -= 100
+            # ペナルティは払ったのでクリアする
+            self.zero_throttle_time = 0.0
 #            done = True
 
         # アクセルを踏んでいない時間
-        if throttle <=0.0:
+        if throttle <=0.002:
             self.zero_throttle_time += self.t
         else:
             self.zero_throttle_time = 0.0
@@ -859,6 +861,10 @@ class GenesisScene:
         # 7) 制限速度と統合（現状は∞→ v_max_min がそのままターゲット）
         speed_limit    = float("inf")   # TODO: マップ側から取得
         limit_v_target = float(min(speed_limit, vmax_min_hH))
+
+        print(f"[VMAX] vel={vel:.3f}  vmax_local={vmax_local:.3f}  "
+            f"vmax_min_hH={vmax_min_hH:.3f}  limit_v_target={limit_v_target:.3f}  "
+            f"v_ratio={float(vel)/(vmax_local+1e-3):.3f}  headroom={vmax_local-float(vel):.3f}")
 
         # 8) 既存10次元（obs10）を先に構築してある前提
         #   obs10 = np.array([target_wp_relative_x, target_wp_relative_y, pos[0], pos[1],

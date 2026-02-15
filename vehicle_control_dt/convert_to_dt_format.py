@@ -104,15 +104,19 @@ def main():
 #
 #    count_new = all_obs.shape[0]
 
-#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+#前に進まなくなった直接の原因 index=11 のstdが小さすぎる
     obs_mean = all_obs.mean(axis=0).astype(np.float32)
-    obs_std  = all_obs.std(axis=0).astype(np.float32) + 1e-6
-#    obs_mean_new = all_obs.mean(axis=0)
-#    obs_std_new  = all_obs.std(axis=0) + 1e-6
-#
-#    # 合成（分布変動に強くするため std は最大値を採用）
-#    obs_mean = (obs_mean_prev * count_prev + obs_mean_new * count_new) / max(1, (count_prev + count_new))
-#    obs_std  = np.maximum(obs_std_prev, obs_std_new)
+    obs_std = all_obs.std(axis=0).astype(np.float32)
+    obs_std = np.maximum(obs_std, 0.05).astype(np.float32)   # 下限は要調整
+#    #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+#        obs_mean = all_obs.mean(axis=0).astype(np.float32)
+#        obs_std  = all_obs.std(axis=0).astype(np.float32) + 1e-6
+#    #    obs_mean_new = all_obs.mean(axis=0)
+#    #    obs_std_new  = all_obs.std(axis=0) + 1e-6
+#    #
+#    #    # 合成（分布変動に強くするため std は最大値を採用）
+#    #    obs_mean = (obs_mean_prev * count_prev + obs_mean_new * count_new) / max(1, (count_prev + count_new))
+#    #    obs_std  = np.maximum(obs_std_prev, obs_std_new)
 
     # RTGはバッチ正規化用途：ここでは全体で標準化（1次元）
 

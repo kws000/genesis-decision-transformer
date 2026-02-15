@@ -577,8 +577,11 @@ class DecisionTransformer_Step8(nn.Module):
 class DecisionTransformer(nn.Module):
 
     #※ timestep_vocab は TIMESTEP_MAX 以上の2の乗数で
-    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = 0.8, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
-#   def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
+    
+#前に進まなくなった直接の原因	force_clipがせまい
+    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = 1.0, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
+#     def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = 0.8, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
+##   def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
   
         super().__init__()
         self.obs_dim = obs_dim
@@ -757,6 +760,10 @@ class DecisionTransformer(nn.Module):
                     return_focus: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
 #   def forward(self, timesteps, states, actions, returns_to_go):
 
+        #前に進めない問題 forward の冒頭
+        self._fwd_count = getattr(self, "_fwd_count", 0) + 1
+        fwd_id = self._fwd_count
+
 #計画と行動のマルチタスクモデル
         B, T, _ = states.shape
 #       B, T = states.shape[0], states.shape[1]
@@ -807,13 +814,72 @@ class DecisionTransformer(nn.Module):
 #ボトルネック認識とVmax魂の注入 アクセルが負の数値になる 非負制約 スケール調整
         raw = self.predict_action(h_act)            # (B, T, A=2) = [steer_raw, throttle_raw]
 
+#前に進まない問題
         if getattr(self, "_probe_force", False):
             self._probe_force = False
+
+            print("[FWD] id(self) =", id(self))
             print("[FWD] force_clip attr =", getattr(self, "force_clip", None))
             print("[FWD] using class =", self.__class__.__module__, self.__class__.__name__)
-            # ロジットから手計算（この forward のコード経由ではない）
-            test = torch.sigmoid(torch.tensor([[-2.0554783]], device=h_act.device)) * float(self.force_clip)
-            print("[FWD] test throttle (σ(-2.055)*force_clip) =", float(test))
+
+            # bias も出す（throttle が潰れる時に超重要）
+            try:
+                layer = self.predict_action[-1]  # Sequential想定
+            except TypeError:
+                layer = self.predict_action      # Linear想定
+
+            b = layer.bias.detach().cpu().numpy()
+            print("[FWD] head.bias =", b)
+
+            # ---- raw / throt / pred_actions を同一 forward で確認 ----
+            throt_logit = raw[..., 1]                          # (B,T)
+            throt_sig   = torch.sigmoid(throt_logit)           # (B,T)
+            throt       = throt_sig * float(self.force_clip)   # (B,T)
+
+            # 最終アクション（あなたの本処理と同じ）
+            steer = raw[..., 0:1]
+            throt2 = throt.unsqueeze(-1)                       # (B,T,1)
+            pred_actions_dbg = torch.cat([steer, throt2], dim=-1)
+
+            # 「最後の時刻」だけ表示
+            tl = throt_logit[0, -1].detach().item()
+            ts = throt_sig[0, -1].detach().item()
+            th = throt[0, -1].detach().item()
+
+            print(f"[FWD] raw_last = {raw[0,-1].detach().cpu().numpy()}")
+            print(f"[FWD] throt_logit={tl:+.6f} sigmoid={ts:.8f} throt={th:.8f} force_clip={float(self.force_clip)}")
+            print(f"[FWD] pred_actions_last = {pred_actions_dbg[0,-1].detach().cpu().numpy()}")
+
+#エラーだらけ今はオミット
+#            # 「この呼び出しの」最終値をキャッシュ
+#            self._probe = dict(
+#                fwd_id=fwd_id,
+#                pred_last=pred_actions[0, -1].detach().cpu().numpy(),
+#                raw_last=raw[0, -1].detach().cpu().numpy(),
+#                throt_logit=float(throt_logit[0, -1]),
+#                throt=float(throt[0, -1, 0]),
+#            )
+#            print("[FWD] fwd_id=", fwd_id, " pred_last=", self._probe["pred_last"])
+
+
+#        if getattr(self, "_probe_force", False):
+#            self._probe_force = False
+#            print("[FWD] force_clip attr =", getattr(self, "force_clip", None))
+#            print("[FWD] using class =", self.__class__.__module__, self.__class__.__name__)
+#            # ロジットから手計算（この forward のコード経由ではない）
+#            test = torch.sigmoid(torch.tensor([[-2.0554783]], device=h_act.device)) * float(self.force_clip)
+#            print("[FWD] test throttle (σ(-2.055)*force_clip) =", float(test))
+#
+#            # 前に進まないので調査
+#            steer_logit  = raw[..., 0:1]
+#            throt_logit  = raw[..., 1:2]
+#            throt        = torch.sigmoid(throt_logit) * self.force_clip
+#            print(
+#                f"[FWD] throt_logit={float(throt_logit[0,-1,0]): .4f} "
+#                f"sigmoid={float(torch.sigmoid(throt_logit[0,-1,0])): .6f} "
+#                f"throt={float(throt[0,-1,0]): .8f} "
+#                f"force_clip={float(self.force_clip)}"
+#            )
 
         steer = raw[..., 0:1]                       # ステアは線形のまま（必要なら後述の tanh も可）
         throt = torch.sigmoid(raw[..., 1:2]) * self.force_clip  # [0, FORCE_CLIP]

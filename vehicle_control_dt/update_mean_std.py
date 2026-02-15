@@ -1,3 +1,6 @@
+#注意）これ多分現在未使用です　convert_to_dt_format.pyで mean_std.pklが計算されている
+
+
 import os
 import numpy as np
 import pandas as pd

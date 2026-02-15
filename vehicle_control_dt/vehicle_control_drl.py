@@ -150,6 +150,8 @@ def generate_bernoulli_waypoints(
     pts = np.stack([x_full, y_full, np.zeros_like(x_full)], axis=1)
     return pts + center
 
+# システム
+
 # False:PurePursaitによる運転と教師CSVの収集、True:bc_modelによる推論運転
 is_mode_bc_model = False#True
 # ビュアーやSleepをスキップする高速モード
@@ -490,48 +492,60 @@ def get_obs(car_pos,car_vel,car_yaw,target_wp,target_next_wp,passed,is_first_che
     return np.array([target_wp_relative_x, target_wp_relative_y, car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
 #    return np.array([target_wp[0], target_wp[1], car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
 
-def compute_reward(obs,t):
-    # obs = [x, y, yaw, speed, cross_track_err, heading_err]
-    speed = obs[5+1]
-    cte   = obs[6+1]  # Cross Track Error
-    he    = obs[7+1]  # Heading Error
-    passed = obs[8+1] #　ポイント通過
+# 前に進まない学習を報酬で改善
+def compute_reward_teacher(obs, t, stuck_count):
+    vel    = float(obs[6])
+    he     = float(obs[8])
+    passed = float(obs[9]) > 0.5
+    vlim   = float(obs[18])
 
-    # 基本報酬：速度を奨励しつつ、軌道逸脱を罰する
+    # (1) 時間コスト
+    r_time = -0.003
 
-    speed = speed * math.cos(he)
+    # (2) 進捗
+    progress = vel * math.cos(he)
+    r_prog = 0.02 * progress
 
-#ボトルネック認識とVmax魂の注入 早い程良いに決まってるので戻す
-#    # いやだけどこうしないとスピード狂がどうにもやめられない
-#    speed = 20.0 if speed > 20.0 else speed 
+    # (3) stuckペナ（1秒以上停止）
+    r_stuck = -0.2 if stuck_count > 100 else 0.0
 
-    # 追加の報酬修正
-    time_bonus_max = 30.0 # 30秒以上なら報酬なし
-    rest_time = time_bonus_max - t
-    rate = rest_time / time_bonus_max
-    rate = 0 if rate < 0 else rate 
-    passed_bonus_scale = rate
+    # passedボーナス（既存思想を残すなら）
+    time_bonus_max = 30.0
+    rate = max((time_bonus_max - t) / time_bonus_max, 0.0)
+    r_pass = (5.0 * rate) if passed else 0.0
 
-# 報酬を明確な時だけにする
-    reward = 5.0 * passed_bonus_scale if passed else 0
-#    reward = speed * delta_time                  # 前向きに進んでるか
-#    reward -= 0.1 * abs(cte)                   # 軌道からのずれを罰する
-#    reward -= 0.05 * abs(he)                   # 向きのズレも罰する
-#    reward += 1 if passed else 0       #1000ポイントあると1000貰える
+    # vmax超過のみ罰
+    over = max(vel - vlim, 0.0)
+    r_vmax = -0.02 * (over ** 2)
 
-    # 逆走など明らかに異常な場合に罰則
-    if speed < -0.1:
-        reward -= 5.0
+    return r_time + r_prog + r_stuck + r_pass + r_vmax
 
-    # 一周したので残り時間から報酬追加
-    if rest_time < 0.0:
-        # 30秒以上経過したので失敗
-        reward -= 0.01
-    elif is_off_track(obs):
-        # コースアウトは大きな罰だが、回復の見込みは普通にあるので終了にはしない
-        reward -= 0.1  # 罰として明確に伝える
-
-    return reward
+#def compute_reward(obs,t):
+#    # obs = [x, y, yaw, speed, cross_track_err, heading_err]
+#    speed = obs[5+1]
+#    cte   = obs[6+1]  # Cross Track Error
+#    he    = obs[7+1]  # Heading Error
+#    passed = obs[8+1] #　ポイント通過
+#    # 基本報酬：速度を奨励しつつ、軌道逸脱を罰する
+#    speed = speed * math.cos(he)
+#    # 追加の報酬修正
+#    time_bonus_max = 30.0 # 30秒以上なら報酬なし
+#    rest_time = time_bonus_max - t
+#    rate = rest_time / time_bonus_max
+#    rate = 0 if rate < 0 else rate 
+#    passed_bonus_scale = rate
+#    reward = 5.0 * passed_bonus_scale if passed else 0
+#    # 逆走など明らかに異常な場合に罰則
+#    if speed < -0.1:
+#        reward -= 5.0
+#    # 一周したので残り時間から報酬追加
+#    if rest_time < 0.0:
+#        # 30秒以上経過したので失敗
+#        reward -= 0.01
+#    elif is_off_track(obs):
+#        # コースアウトは大きな罰だが、回復の見込みは普通にあるので終了にはしない
+#        reward -= 0.1  # 罰として明確に伝える
+#    return reward
 
 def is_off_track(obs, max_perp_error=1.2):
     """
@@ -599,6 +613,9 @@ def run_control_loop(scene, car,sphere,bc_model):
     H_PREVIEW = 10
     MU_DEFAULT = 0.8
     SPEED_LIMIT = None  # 実装あれば数値を入れて min 取る
+
+    # 前に進まない学習を報酬で改善
+    stuck_count = 0 
 
 # ----- 制御ループ（例: Genesis4D の step() 内など） -----
     for step in range(20_0000):
@@ -784,8 +801,21 @@ def run_control_loop(scene, car,sphere,bc_model):
 #                          ,passed=passed
 #                          ,is_first_check_point=is_first)
 
+
+            #前に進まない学習を報酬で改善 obsを作った直後に、進行度合いのカウンターを進める
+            vel = float(obs[6])          # velocity
+            he  = float(obs[8])          # heading_error
+            progress = vel * math.cos(he)
+            # しきい値は箱庭スケールに合わせて後で調整（まずは小さめ）
+            if abs(progress) < 0.03:
+                stuck_count += 1
+            else:
+                stuck_count = 0
+
             # 報酬
-            reward = compute_reward(obs=obs,t=t)
+#前に進まない学習を報酬で改善
+            reward = compute_reward_teacher(obs=obs,t=t,stuck_count=stuck_count)
+#            reward = compute_reward_teacher(obs=obs,t=t)
             reward_total += reward
 
             print(f"[{t:.3f}]教師 reward {reward:.2f} total {reward_total:.2f}")
@@ -878,6 +908,10 @@ def run_control_loop(scene, car,sphere,bc_model):
         #    ここで steer_angle, throttle を実行関数に渡す
         car.control_dofs_position([steer_angle, steer_angle], idx_steer)
         car.control_dofs_force([throttle, throttle], idx_wheels)
+
+#        print(f"教師の control_dofs_force throttle={throttle}")
+
+
         # 経過時間の記録
         t += scene.dt
         # 10) Genesis4D のタイムステップを回す

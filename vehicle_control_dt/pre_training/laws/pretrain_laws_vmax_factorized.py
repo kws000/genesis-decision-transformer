@@ -16,6 +16,9 @@ class CSVDataset(Dataset):
         self.x_std  = np.maximum(self.X.std(0, keepdims=True).astype(np.float32), 1e-3)  # クリップ
         self.y_mean = np.float32(self.y.mean())
         self.y_std  = np.float32(max(float(self.y.std()), 1e-3))
+        #vmaxモデルの符号バグ 
+        self.x_min  = self.X.min(0, keepdims=True).astype(np.float32)
+        self.x_max  = self.X.max(0, keepdims=True).astype(np.float32)
 
     def __len__(self): return len(self.X)
     def __getitem__(self, i): return self.X[i], self.y[i]
@@ -83,6 +86,8 @@ def main():
             torch.save(model.state_dict(), args.save)
             np.savez(args.save_scaler,
                      x_mean=x_mean, x_std=x_std, y_mean=y_mean, y_std=y_std,
+                     #vmaxモデルの符号バグ
+                     x_min=ds_full.x_min,x_max=ds_full.x_max,
                      x_cols=np.array(ds_full.x_cols))
             print(f"  -> saved {args.save}  (scaler: {args.save_scaler})")
 
