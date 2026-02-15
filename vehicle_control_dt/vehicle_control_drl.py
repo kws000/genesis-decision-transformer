@@ -152,10 +152,8 @@ def generate_bernoulli_waypoints(
 
 # システム
 
-# False:PurePursaitによる運転と教師CSVの収集、True:bc_modelによる推論運転
-is_mode_bc_model = False#True
 # ビュアーやSleepをスキップする高速モード
-is_mode_fast = True#False
+is_mode_fast = False#True#False
 
 # 経路情報
 WAYPOINTS = generate_bernoulli_waypoints(a=2.0) # 0.5 m matches the OBJ
@@ -401,7 +399,6 @@ def point_ahead_on_waypoints(waypoints: np.ndarray,
 +    - direc          : +1 or -1
 +    """
 
-#pos_xy→xyz
     wp = np.asarray(waypoints)
     # (N,3) の場合は XY だけ使う。 (N,2) はそのまま
     if wp.ndim != 2 or wp.shape[0] == 0:
@@ -415,10 +412,6 @@ def point_ahead_on_waypoints(waypoints: np.ndarray,
     # 1本目の区間: 現在位置(xy) -> target_wp(xy)
     seg_start = np.asarray(start_pos_world[:2], dtype=np.float32)
     seg_end   = wp_xy[start_wp_idx % N]
-#    N = len(waypoints)
-#    # 1本目の区間: 現在位置 -> target_wp
-#    seg_start = start_pos_world.astype(np.float32)
-#    seg_end   = waypoints[start_wp_idx % N].astype(np.float32)
 
     remain = float(distance)
     # まずは現在位置から target_wp まで
@@ -431,25 +424,19 @@ def point_ahead_on_waypoints(waypoints: np.ndarray,
         else:
             if remain <= seg_len:
                 r = remain / seg_len
-#pos_xy→xyz
                 pt = seg_start + r * v
                 return np.asarray(pt, dtype=np.float32)                
-#                return seg_start + r * v
             
             remain -= seg_len
             seg_start = seg_end
         # 以降の区間: wp[i] -> wp[i+direc]
-#pos_xy→xyz
         next_idx = (start_wp_idx + direc) % N
         seg_end = wp_xy[next_idx]
-#        next_idx = (start_wp_idx + direc) % N
-#        seg_end = waypoints[next_idx].astype(np.float32)
 
         start_wp_idx = next_idx
+
     # 走り切っても足りない場合は最後の点を返す
-#pos_xy→xyz
     return np.asarray(seg_end, dtype=np.float32)
-#    return seg_end
 
 def get_obs(car_pos,car_vel,car_yaw,target_wp,target_next_wp,passed,is_first_check_point):
 
@@ -469,12 +456,8 @@ def get_obs(car_pos,car_vel,car_yaw,target_wp,target_next_wp,passed,is_first_che
     target_dir = target_wp - car_pos
     target_dir = target_dir / np.linalg.norm(target_dir)
     segment_dir = segment / np.linalg.norm(segment)
+    # 真正面で0.0　真横で1.0 真後ろで2.0
     inner_angle = np.dot(target_dir, segment_dir)
-    # 1.0 0.0 -1.0
-    # ↓ x 1.0
-    # -1.0 0.0 1.0
-    # ↓ + 1.0
-    # 0.0 1.0 2.0   ※真正面で0.0　真横で1.0 真後ろで2.0
     perp_error = 1.0 - inner_angle
 
     #まだチェックポイント上に乗っていないのでコースアウトは無視する
@@ -488,9 +471,8 @@ def get_obs(car_pos,car_vel,car_yaw,target_wp,target_next_wp,passed,is_first_che
     
     car_yaw_sin,car_yaw_cos = yaw_to_sin_cos(car_yaw)
 
-#計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
+    #計画と行動のマルチタスクモデル 計画が相対なのでターゲット位置も相対に変更
     return np.array([target_wp_relative_x, target_wp_relative_y, car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
-#    return np.array([target_wp[0], target_wp[1], car_pos[0], car_pos[1], car_yaw_sin,car_yaw_cos, car_vel, perp_error, heading_error,passed], dtype=np.float32)
 
 # 前に進まない学習を報酬で改善
 def compute_reward_teacher(obs, t, stuck_count):
@@ -520,32 +502,6 @@ def compute_reward_teacher(obs, t, stuck_count):
 
     return r_time + r_prog + r_stuck + r_pass + r_vmax
 
-#def compute_reward(obs,t):
-#    # obs = [x, y, yaw, speed, cross_track_err, heading_err]
-#    speed = obs[5+1]
-#    cte   = obs[6+1]  # Cross Track Error
-#    he    = obs[7+1]  # Heading Error
-#    passed = obs[8+1] #　ポイント通過
-#    # 基本報酬：速度を奨励しつつ、軌道逸脱を罰する
-#    speed = speed * math.cos(he)
-#    # 追加の報酬修正
-#    time_bonus_max = 30.0 # 30秒以上なら報酬なし
-#    rest_time = time_bonus_max - t
-#    rate = rest_time / time_bonus_max
-#    rate = 0 if rate < 0 else rate 
-#    passed_bonus_scale = rate
-#    reward = 5.0 * passed_bonus_scale if passed else 0
-#    # 逆走など明らかに異常な場合に罰則
-#    if speed < -0.1:
-#        reward -= 5.0
-#    # 一周したので残り時間から報酬追加
-#    if rest_time < 0.0:
-#        # 30秒以上経過したので失敗
-#        reward -= 0.01
-#    elif is_off_track(obs):
-#        # コースアウトは大きな罰だが、回復の見込みは普通にあるので終了にはしない
-#        reward -= 0.1  # 罰として明確に伝える
-#    return reward
 
 def is_off_track(obs, max_perp_error=1.2):
     """
@@ -562,7 +518,7 @@ def is_off_track(obs, max_perp_error=1.2):
     """
     perp_error = obs[6+1]  # 横方向の誤差
 
-#  通り過ぎこそ罰にしないと
+    #  通り過ぎこそ罰にしないと
     if perp_error > max_perp_error:
         return True
     else:
@@ -639,11 +595,10 @@ def run_control_loop(scene, car,sphere,bc_model):
         car_speed = np.array(car.get_dofs_velocity()).mean()
 
         # 5) 速度依存ルックアヘッドを計算
-        L = compute_lookahead(v=car_speed, k_la=K_LOOK, v_eps=V_EPS)
 
-        # 同じアルゴリズムに合わせないと駄目なので仕方なく
-        # これの変動が過敏すぎてターゲット位置をあらぶらせている
+# これの変動が過敏すぎてターゲット位置をあらぶらせているので固定
         L = 1.25#L if L < 1.5 else 1.5
+#        L = compute_lookahead(v=car_speed, k_la=K_LOOK, v_eps=V_EPS)
 
         # シンプルに次の通過点へ進めるモード
         # チェックポイント通過チェック
@@ -698,204 +653,117 @@ def run_control_loop(scene, car,sphere,bc_model):
         time_bonus_max = 30.0 # 30秒以上なら報酬なし
         rest_time = time_bonus_max - t
 
-        if is_mode_bc_model:
-            # AIによる自動運転モード
-            # AI入力ベクトルを作成して推論
-            # ターゲット方向
-            dx, dy = target_wp - pos_xy
-            target_yaw = math.atan2(dy, dx)
-            # セグメント方向
-            segment = target_next_wp - target_wp
-            # ヘディング誤差（-pi ～ +pi に wrap）
-            # ※車体とターゲット方向の角度差
-            heading_error = target_yaw - yaw
-            heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
-            # CTE（ターゲット方向に直交する方向への距離）
-            target_dir = target_wp - pos_xy
-            target_dir = target_dir / np.linalg.norm(target_dir)
-            segment_dir = segment / np.linalg.norm(segment)
-            inner_angle = np.dot(target_dir, segment_dir)
-            # 1.0 0.0 -1.0
-            # ↓ x 1.0
-            # -1.0 0.0 1.0
-            # ↓ + 1.0
-            # 0.0 1.0 2.0   ※真正面で0.0　真横で1.0 真後ろで2.0
-            perp_error = 1.0 - inner_angle
-            #まだチェックポイント上に乗っていないのでコースアウトは無視する
-            if waypoint_idx == start_waypoint_idx:
-                perp_error = 0.0
+        # 6) Pure-Pursuit で生ステア角を計算
+        #    WAYPOINTS が (N,2) 形式ならそのまま渡せる
+        delta_pp = pure_pursuit_steer(
+            target_wp=target_wp,
+            pos_xy=pos_xy,
+            yaw=yaw,
+            lookahead=L,
+            wheelbase=1.2,#1.0 0.4 0.3
+        )
 
-            input_array = np.array([
-                target_wp[0], target_wp[1],
-                pos_xy[0], pos_xy[1], yaw, car_speed,
-                perp_error,heading_error,passed
-            ], dtype=np.float32)
+        # 7) 一階遅れフィルタでステア角を平滑化
+        steer_angle = latency_filter(delta_pp)
 
-            input_tensor = torch.tensor(input_array)
+        # ───────────
+        # 8) 車速 PID
 
-            with torch.no_grad():
-                steer_angle, throttle = bc_model(input_tensor).tolist()
-                steer_angle = max(-MAX_STEER_RAD, min(MAX_STEER_RAD, steer_angle))
+        #ボトルネック認識とVmax魂の注入 アクセルが負の数値になる
+        # 目標速度（vmax と連携するなら min(TARGET_SPEED_BASE, limit_v_target) を使う）
+        v_ref = TARGET_SPEED
+        # PI（アンチワインドアップ付き）
+        speed_error = v_ref - car_speed
+        # 飽和前のコントロール
+        u_raw = KP_SPEED * speed_error + KI_SPEED * integ_speed_error
+        # 物理域で飽和（前進のみ＝非負）
+        u_sat = max(0.0, min(FORCE_CLIP, u_raw))
+        # ★アンチワインドアップ（条件付き積分：飽和時は誤差が飽和方向に押しているときだけ積分）
+        allow_integrate = (
+            (0.0 < u_raw < FORCE_CLIP) or
+            (u_raw >= FORCE_CLIP and speed_error < 0) or
+            (u_raw <= 0.0      and speed_error > 0)
+        )
+        if allow_integrate:
+            integ_speed_error += speed_error * scene.dt
+        throttle = u_sat
+        # 発進補助（停止近傍で最小トルク）
+        if abs(car_speed) < 0.1 and throttle < 0.05 * FORCE_CLIP:
+            throttle = 0.05 * FORCE_CLIP
+
+        #ボトルネック認識とVmax魂の注入 3.2 
+        obs = build_obs_v2_pure(
+            pos_xy=pos_xy, yaw=yaw, vel=car_speed, passed=passed,
+            target_wp=target_wp, target_next_wp=target_next_wp,
+            waypoint_idx=waypoint_idx, waypoint_direc=waypoint_direc,
+            WAYPOINTS=WAYPOINTS,
+            vmax_model=vmax_model,
+            H_preview=H_PREVIEW, mu_default=MU_DEFAULT, speed_limit=SPEED_LIMIT
+        )
+
+        #前に進まない学習を報酬で改善 obsを作った直後に、進行度合いのカウンターを進める
+        vel = float(obs[6])          # velocity
+        he  = float(obs[8])          # heading_error
+        progress = vel * math.cos(he)
+        # しきい値は箱庭スケールに合わせて後で調整（まずは小さめ）
+        if abs(progress) < 0.03:
+            stuck_count += 1
         else:
-            # 6) Pure-Pursuit で生ステア角を計算
-            #    WAYPOINTS が (N,2) 形式ならそのまま渡せる
-            delta_pp = pure_pursuit_steer(
-                target_wp=target_wp,
-                pos_xy=pos_xy,
-                yaw=yaw,
-                lookahead=L,
-                wheelbase=1.2,#1.0 0.4 0.3
-            )
+            stuck_count = 0
 
-            # 7) 一階遅れフィルタでステア角を平滑化
-            steer_angle = latency_filter(delta_pp)
+        # 報酬
+        #前に進まない学習を報酬で改善
+        reward = compute_reward_teacher(obs=obs,t=t,stuck_count=stuck_count)
+        reward_total += reward
 
-            # ───────────
-            # 8) 車速 PID
+        print(f"[{t:.3f}]教師 reward {reward:.2f} total {reward_total:.2f}")
 
-#ボトルネック認識とVmax魂の注入 アクセルが負の数値になる
+        # 教師データ記録
 
-            # 目標速度（vmax と連携するなら min(TARGET_SPEED_BASE, limit_v_target) を使う）
-            v_ref = TARGET_SPEED
-            # PI（アンチワインドアップ付き）
-            speed_error = v_ref - car_speed
-            # 飽和前のコントロール
-            u_raw = KP_SPEED * speed_error + KI_SPEED * integ_speed_error
-            # 物理域で飽和（前進のみ＝非負）
-            u_sat = max(0.0, min(FORCE_CLIP, u_raw))
-            # ★アンチワインドアップ（条件付き積分：飽和時は誤差が飽和方向に押しているときだけ積分）
-            allow_integrate = (
-                (0.0 < u_raw < FORCE_CLIP) or
-                (u_raw >= FORCE_CLIP and speed_error < 0) or
-                (u_raw <= 0.0      and speed_error > 0)
-            )
-            if allow_integrate:
-                integ_speed_error += speed_error * scene.dt
-            throttle = u_sat
-            # 発進補助（停止近傍で最小トルク）
-            if abs(car_speed) < 0.1 and throttle < 0.05 * FORCE_CLIP:
-                throttle = 0.05 * FORCE_CLIP
-#            speed_error = TARGET_SPEED - car_speed
-#            integ_speed_error += speed_error * scene.dt
-#            throttle = KP_SPEED * speed_error + KI_SPEED * integ_speed_error
-#            # Clip しておく
-#            throttle = max(-FORCE_CLIP, min(FORCE_CLIP, throttle))
-
-            # 観測データ
-            is_first = True if waypoint_idx==start_waypoint_idx else False
-
-#ボトルネック認識とVmax魂の注入 3.2 
-            obs = build_obs_v2_pure(
-                pos_xy=pos_xy, yaw=yaw, vel=car_speed, passed=passed,
-                target_wp=target_wp, target_next_wp=target_next_wp,
-                waypoint_idx=waypoint_idx, waypoint_direc=waypoint_direc,
-                WAYPOINTS=WAYPOINTS,
-                vmax_model=vmax_model,
-                H_preview=H_PREVIEW, mu_default=MU_DEFAULT, speed_limit=SPEED_LIMIT
-            )
-#            obs = get_obs(car_pos=pos_xy
-#                          ,car_vel=car_speed
-#                          ,car_yaw=yaw
-#                          ,target_wp=target_wp
-#                          ,target_next_wp=target_next_wp
-#                          ,passed=passed
-#                          ,is_first_check_point=is_first)
-
-
-            #前に進まない学習を報酬で改善 obsを作った直後に、進行度合いのカウンターを進める
-            vel = float(obs[6])          # velocity
-            he  = float(obs[8])          # heading_error
-            progress = vel * math.cos(he)
-            # しきい値は箱庭スケールに合わせて後で調整（まずは小さめ）
-            if abs(progress) < 0.03:
-                stuck_count += 1
-            else:
-                stuck_count = 0
-
-            # 報酬
-#前に進まない学習を報酬で改善
-            reward = compute_reward_teacher(obs=obs,t=t,stuck_count=stuck_count)
-#            reward = compute_reward_teacher(obs=obs,t=t)
-            reward_total += reward
-
-            print(f"[{t:.3f}]教師 reward {reward:.2f} total {reward_total:.2f}")
-
-            # 教師データ記録
-
-            #計画と行動のマルチタスクモデル　教師データに計画を入れる
-            # ==== Plan A: 将来参照点（ego座標）を生成 ====
-            # 速度連動 lookahead（計画用は固定化せず v に追従）
-            LA = L
-#            LA = compute_lookahead(v=car_speed, k_la=K_LOOK, v_eps=V_EPS)
-#            LA = max(PLAN_LA_MIN, min(PLAN_LA_MAX, LA))
-            dists = [f * LA for f in PLAN_FACTORS[:PLAN_M]]
-            plan_xy: list[float] = []
+        #計画と行動のマルチタスクモデル　教師データに計画を入れる
+        # ==== Plan A: 将来参照点（ego座標）を生成 ====
+        # 速度連動 lookahead（計画用は固定化せず v に追従）
+        LA = L
+        dists = [f * LA for f in PLAN_FACTORS[:PLAN_M]]
+        plan_xy: list[float] = []
+        #　計画ベクトル列の可視化
+        debug_plan_xy_world: list[float] = []
+        for d in dists:
+            w_pt = point_ahead_on_waypoints(WAYPOINTS, pos_xy, waypoint_idx, waypoint_direc, d)
+            ex, ey = world_to_ego(w_pt[0], w_pt[1], pos_xy, yaw)
+            plan_xy.extend([ex, ey])  # [x1,y1,x2,y2,x3,y3]
             #　計画ベクトル列の可視化
-            debug_plan_xy_world: list[float] = []
-            for d in dists:
-                w_pt = point_ahead_on_waypoints(WAYPOINTS, pos_xy, waypoint_idx, waypoint_direc, d)
-                ex, ey = world_to_ego(w_pt[0], w_pt[1], pos_xy, yaw)
-                plan_xy.extend([ex, ey])  # [x1,y1,x2,y2,x3,y3]
-                #　計画ベクトル列の可視化
-                debug_plan_xy_world.extend([w_pt[0],w_pt[1]])
+            debug_plan_xy_world.extend([w_pt[0],w_pt[1]])
 
-            #　計画ベクトル列の可視化
-            for i in range(0,2):
-                allow_plan_src_x = debug_plan_xy_world[i*2+0]
-                allow_plan_src_y = debug_plan_xy_world[i*2+1]
+        #　計画ベクトル列の可視化
+        for i in range(0,2):
+            allow_plan_src_x = debug_plan_xy_world[i*2+0]
+            allow_plan_src_y = debug_plan_xy_world[i*2+1]
 
-                allow_plan_dst_x = debug_plan_xy_world[(i+1)*2+0]
-                allow_plan_dst_y = debug_plan_xy_world[(i+1)*2+1]
+            allow_plan_dst_x = debug_plan_xy_world[(i+1)*2+0]
+            allow_plan_dst_y = debug_plan_xy_world[(i+1)*2+1]
 
-                segment_plan_x = allow_plan_dst_x - allow_plan_src_x
-                segment_plan_y = allow_plan_dst_y - allow_plan_src_y
+            segment_plan_x = allow_plan_dst_x - allow_plan_src_x
+            segment_plan_y = allow_plan_dst_y - allow_plan_src_y
 
-                debug_arrow_plans[i] = scene.draw_debug_arrow(
-                        pos=(allow_plan_src_x, allow_plan_src_y, 0.1),
-                        vec=(segment_plan_x, segment_plan_y, 0.0),
-                        radius=0.005, color=(0, 1, 1, 0.5))  # LightBlue
+            debug_arrow_plans[i] = scene.draw_debug_arrow(
+                    pos=(allow_plan_src_x, allow_plan_src_y, 0.1),
+                    vec=(segment_plan_x, segment_plan_y, 0.0),
+                    radius=0.005, color=(0, 1, 1, 0.5))  # LightBlue
 
-
-#ボトルネック認識とVmax魂の注入 3.3 記録
-            # ★ 教師データ記録（OBS_V2 固定順＋出力＋報酬＋計画）
-            row = dict(zip(OBS_V2_KEYS, obs.tolist()))
-            row.update({
-                "steer_angle": float(steer_angle),
-                "throttle": float(throttle),
-                "reward": float(reward),
-                "reward_total": float(reward_total),
-                "plan_x1": float(plan_xy[0]), "plan_y1": float(plan_xy[1]),
-                "plan_x2": float(plan_xy[2]), "plan_y2": float(plan_xy[3]),
-                "plan_x3": float(plan_xy[4]), "plan_y3": float(plan_xy[5]),
-            })
-            data_log.append(row)
-#            # 教師データ記録（plan_x*, plan_y* を追加）
-#            data_log.append({
-#                # 環境
-#                "target_wp_x": obs[0],# target_wp[0],# ９次元に拡張し順序を合わせる
-#                "target_wp_y": obs[1],  #target_wp[1],# ９次元に拡張し順序を合わせる
-#                "pos_x": obs[2],        #pos_xy[0],
-#                "pos_y": obs[3],        #pos_xy[1],
-#                # 断続しないヨー角 １０次元に    
-#                "yaw_sin": obs[4],          #yaw,
-#                "yaw_cos": obs[5],          #yaw,
-#                "velocity": obs[5+1],     #car_speed,
-#                "perp_error":obs[6+1],    #0.0,           # ９次元に拡張し順序を合わせる
-#                "heading_error":obs[7+1], #0.0,        # ９次元に拡張し順序を合わせる
-#                "passed":obs[8+1],        #0.0,               # ９次元に拡張し順序を合わせる
-#                # 出力
-#                "steer_angle": steer_angle,
-#                "throttle": throttle,       
-#                # 報酬
-##計画と行動のマルチタスクモデル　教師データに計画を入れる
-#                "reward": reward,       # ← ステップ報酬（学習に使う）
-#                "reward_total": reward,  # ← 参考：累積（解析用）                
-#                # 計画（ego座標の将来点; M=3 固定）
-#                "plan_x1": plan_xy[0], "plan_y1": plan_xy[1],
-#                "plan_x2": plan_xy[2], "plan_y2": plan_xy[3],
-#                "plan_x3": plan_xy[4], "plan_y3": plan_xy[5],                
-##                "reward": reward       
-#            })
+        #ボトルネック認識とVmax魂の注入 3.3 記録
+        # ★ 教師データ記録（OBS_V2 固定順＋出力＋報酬＋計画）
+        row = dict(zip(OBS_V2_KEYS, obs.tolist()))
+        row.update({
+            "steer_angle": float(steer_angle),
+            "throttle": float(throttle),
+            "reward": float(reward),
+            "reward_total": float(reward_total),
+            "plan_x1": float(plan_xy[0]), "plan_y1": float(plan_xy[1]),
+            "plan_x2": float(plan_xy[2]), "plan_y2": float(plan_xy[3]),
+            "plan_x3": float(plan_xy[4]), "plan_y3": float(plan_xy[5]),
+        })
+        data_log.append(row)
 
         # 一周したらおわり
         if waypoint_idx == end_waypoint_idx or rest_time < 0.0:
@@ -911,7 +779,6 @@ def run_control_loop(scene, car,sphere,bc_model):
 
 #        print(f"教師の control_dofs_force throttle={throttle}")
 
-
         # 経過時間の記録
         t += scene.dt
         # 10) Genesis4D のタイムステップを回す
@@ -923,12 +790,7 @@ def run_control_loop(scene, car,sphere,bc_model):
 # ---------------------------------------------------------------------------
 def build_scene(path_to_mjcf: str | Path):
 
-#急にエラーで動かなくなった、、、
-#   Backend tkagg is interactive backend. Turning interactive mode on.
-#   [Genesis] [01:24:48] [WARNING] No Intel XPU device available. Falling back to CPU for torch device.
-#   Assertion failed: pCreateInfo->vulkanApiVersion == 0 || (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 22U) == 1 && (((uint32_t)(pCreateInfo->vulkanApiVersion) >> 12U) & 0x3FFU) <= 3), file C:\Users\buildbot\actions-runner\_work\taichi\taichi\external\VulkanMemoryAllocator\include\vk_mem_alloc.h, line 16039
     gs.init(backend=gs.cpu,logging_level="warning")
-#gs.init(backend=gs.gpu,logging_level="warning")  # ← CPU でも OK
     
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(gravity=(0, 0, -9.81)),
@@ -956,8 +818,6 @@ def build_scene(path_to_mjcf: str | Path):
 
     return scene, car ,sphere
 
-        # time.sleep(0.001)
-
 
 # ---------------------------------------------------------------------------
 # 5) エントリポイント
@@ -975,16 +835,6 @@ def main():
 
     # モデル読み込み
     import os
-
-    bc_model = None
-
-    if os.path.exists("models/bc_model.pth"):
-        bc_model = ControlMLP()
-        bc_model.load_state_dict(torch.load("models/bc_model.pth"))
-        bc_model.eval()
-
-
-
 
     # 制御ループを別スレッドで
     ctrl_thread = threading.Thread(target=run_control_loop, args=(scene, car,sphere,bc_model), daemon=True)
