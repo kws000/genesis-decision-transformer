@@ -527,7 +527,7 @@ def is_off_track(obs, max_perp_error=1.2):
 # ---------------------------------------------------------------------------
 # 4) メインループ（別スレッドで回す）
 # ---------------------------------------------------------------------------
-def run_control_loop(scene, car,sphere,bc_model):
+def run_control_loop(scene, car,sphere):
     # — DOF index —
     steer_left  = car.get_joint("fl_steer_joint").dofs_idx_local[0]
     steer_right = car.get_joint("fr_steer_joint").dofs_idx_local[0]
@@ -837,7 +837,7 @@ def main():
     import os
 
     # 制御ループを別スレッドで
-    ctrl_thread = threading.Thread(target=run_control_loop, args=(scene, car,sphere,bc_model), daemon=True)
+    ctrl_thread = threading.Thread(target=run_control_loop, args=(scene, car,sphere), daemon=True)
     ctrl_thread.start()
 
     # メインスレッドは viewer が閉じられるまでブロック
