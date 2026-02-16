@@ -29,6 +29,8 @@ W_SMOOTH = 0.01
 USE_FOCUS = False
 #EPOCHS = 30#50#100#20#100
 
+#未来報酬の特徴分離 PurePersuiteの速度変動 コースアウトさせるのに必要なパワーをスロットルへ
+FORCE_CLIP     = 3.0#コースアウトさせるのに必要なパワーをスロットルへ
 
 #最新モデルでリプレイする　別手法
 #TRY_CHECKPOINT_PATH = "checkpoints/temp_model.pt"
@@ -107,7 +109,7 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
                                 n_layer=n_layer,
                                 n_head=n_head,
                                 plan_M=PLAN_M,
-                                force_clip=0.8,
+                                force_clip=FORCE_CLIP,
                                 idle_throttle_init=0.0908,
                                 use_focus=USE_FOCUS).to(DEVICE)
 #   model = DecisionTransformer(
@@ -233,7 +235,7 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
             eps = 0.05
             mask = (delta > eps).float()
 
-            pred_th = pred_actions[..., 1]          # [0, force_clip]
+            pred_th = pred_actions[..., 1]
 
             denom = mask.sum() + 1e-6
             L_sm = ((pred_th - 0.0)**2 * mask).sum() / denom

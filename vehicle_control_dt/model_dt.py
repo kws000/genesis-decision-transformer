@@ -14,6 +14,8 @@ from typing import Optional, Tuple, List
 # パラメータ
 TIMESTEP_MAX = 4000
 
+#未来報酬の特徴分離 PurePersuiteの速度変動 コースアウトさせるのに必要なパワーをスロットルへ
+FORCE_CLIP     = 3.0#コースアウトさせるのに必要なパワーをスロットルへ
 
 # アテンションマップの可視化
 class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
@@ -579,7 +581,7 @@ class DecisionTransformer(nn.Module):
     #※ timestep_vocab は TIMESTEP_MAX 以上の2の乗数で
     
 #前に進まなくなった直接の原因	force_clipがせまい
-    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = 1.0, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
+    def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = FORCE_CLIP, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
 #     def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_vocab=4096, plan_M: int = 3, use_focus: bool = False, force_clip: float = 0.8, idle_throttle_init: float = 0.0908,wp_dim: int = 5):
 ##   def __init__(self, obs_dim, act_dim, context_len=1, embed_dim=128, n_layer=2, n_head=4, timestep_max=1024):
   

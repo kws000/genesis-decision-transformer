@@ -21,6 +21,7 @@ from pre_training.laws.laws_vmax_infer import VmaxFactorized  # 既存のラッ�
 #ボトルネック認識とVmax魂の注入 3.1 obsビルダー
 from geo_utils import curvature_from_wps
 
+
 #ボトルネック認識とVmax魂の注入 3.1 obsビルダー
 OBS_V2_KEYS = [
     # 既存10
@@ -160,8 +161,16 @@ WAYPOINTS = generate_bernoulli_waypoints(a=2.0) # 0.5 m matches the OBJ
 # アクセル制御パラメータ
 TARGET_SPEED   = 8.0#5.0#3.0#15.0#1.5      # m/s: 巡航目標
 KP_SPEED       = 0.1#0.006#1.0         #    : 車速 P 利得
-KI_SPEED       = 0.006#0.001#0.0         #    : （必要なら）積分利得  ※これがないとカーブで推進力が足りなくなる
-FORCE_CLIP     = 1.5#0.5
+
+#未来報酬の特徴分離 PurePersuiteの速度変動 コースアウトさせるのに必要なパワーをスロットルへ
+KI_SPEED       = 0.026         #    : （必要なら）積分利得  ※これがないとカーブで推進力が足りなくなる
+#KI_SPEED       = 0.006#0.001#0.0         #    : （必要なら）積分利得  ※これがないとカーブで推進力が足りなくなる
+
+#未来報酬の特徴分離 PurePersuiteの速度変動 コースアウトさせるのに必要なパワーをスロットルへ
+FORCE_CLIP     = 3.0#コースアウトさせるのに必要なパワーをスロットルへ
+#FORCE_CLIP     = 1.5#0.5
+
+
 # Pure-Pursuit + フィルタ用パラメータ
 K_LOOK = 1.0#2.0#1.0#1.5#0.6#1.2           # ルックアヘッド・タイムスケール [s]
 V_EPS = 0.5#0.1            # 最低速度下限 [m/s]
@@ -177,6 +186,22 @@ PLAN_M = 3
 PLAN_FACTORS = [0.7, 1.4, 2.2]  # len=PLAN_M
 PLAN_LA_MIN = 0.5#5.0   # [m]
 PLAN_LA_MAX = 3.0#30.0  # [m]
+
+#未来報酬の特徴分離 PurePersuiteの速度変動 1)追加：速度ばらつき・コースアウト計測パラメータ
+
+# ===== 速度ばらつき（DTのための分岐生成）=====
+TARGET_SPEED_MIN = 8.0     # [m/s] エピソード基準速度の下限
+TARGET_SPEED_MAX = 14.0    # [m/s] 上限
+SPEED_JITTER_STD = 0.6     # [m/s] 区間ごとの揺らぎ（同コーナーでの進入差を作る）
+SPEED_UPDATE_SEC = 0.6     # [s]   どれくらいの頻度で目標速度を更新するか
+
+# 曲率による“軽い”減速（安全をがんじがらめにしない）
+# kappaが大きいほど少しだけ減速する（レーシング的）
+KAPPA_SLOW_GAIN = 0.1#3.0      # 強すぎると遅くなるので小さめから
+
+#未来報酬の特徴分離 PurePersuiteの速度変動 コースアウトチェック用
+LANE_HALF_WIDTH = 0.45   # 例：objがlane025でscale=4.0なら片側1.0m。要調整
+OFFTRACK_HYST   = 0.05         # 5cm程度（スケールに合わせて）
 
 
 # vは正規化不要とのこと
@@ -303,7 +328,79 @@ def find_target_wp_ordered(pos_xy: np.ndarray, waypoints: np.ndarray, lookahead:
     next_idx = 0
     return next_idx , waypoints[0][:2]
 
+# 未来報酬の特徴分離 PurePersuiteの速度変動
+def point_to_segment_distance_2d(p, a, b):
+    """点pと線分abの最短距離と、最近点q、パラメータt(0..1)を返す"""
+    ap = p - a
+    ab = b - a
+    ab2 = float(np.dot(ab, ab))
+    if ab2 < 1e-12:
+        q = a
+        return float(np.linalg.norm(p - q)), q, 0.0
+    t = float(np.dot(ap, ab) / ab2)
+    t = max(0.0, min(1.0, t))
+    q = a + t * ab
+    return float(np.linalg.norm(p - q)), q, t
 
+# 未来報酬の特徴分離 PurePersuiteの速度変動
+def lateral_distance_to_centerline(pos_xy, waypoints_xy, idx_center, direc, window=30):
+    """
+    近傍window区間だけ探索して、中心線（折れ線）からの最短距離を返す。
+    idx_center: 現在追っている waypoint_idx（近傍探索の中心）
+    direc: +1 or -1
+    """
+    wp = np.asarray(waypoints_xy, dtype=np.float32)
+    N = wp.shape[0]
+    p = np.asarray(pos_xy, dtype=np.float32)
+
+    best_d = 1e9
+    best_q = wp[idx_center % N]
+
+    # idx_center 近傍の線分を探索（全探索より軽い）
+    for k in range(-window, window):
+        i0 = (idx_center + k * direc) % N
+        i1 = (i0 + direc) % N
+        a = wp[i0][:2]
+        b = wp[i1][:2]
+        d, q, _ = point_to_segment_distance_2d(p, a, b)
+        if d < best_d:
+            best_d = d
+            best_q = q
+
+    return float(best_d), best_q
+
+
+# 未来報酬の特徴分離 PurePersuiteの速度変動
+def update_offtrack_from_latdist(lat_dist, outside_prev,is_first_check, half_width=LANE_HALF_WIDTH, hyst=OFFTRACK_HYST):
+    """ヒステリシス付きの outside 更新"""
+
+    # この処理は、最初が道の中にいる前提なので、最初からOutの間は常に In を返すように
+    if is_first_check:
+        if lat_dist < (half_width - hyst):
+            #道に初めて乗った
+            is_first_check = False
+            outside_prev = False
+
+    if is_first_check == False:
+        if not outside_prev:
+            # In から
+            if lat_dist > (half_width + hyst):
+                # Out
+                return True,is_first_check
+            else:
+                # In
+                return False,is_first_check
+        else:
+            # Out から
+            if lat_dist < (half_width - hyst):
+                # In
+                return False,is_first_check
+            else:
+                # Out
+                return True,is_first_check
+    else:
+        # 外でもコース内と判定する
+        return False,is_first_check
 
 # ルックアヘッド距離の算出
 def compute_lookahead(v: float,
@@ -543,6 +640,17 @@ def run_control_loop(scene, car,sphere):
     end_waypoint_idx = (start_waypoint_idx - waypoint_direc) % len(WAYPOINTS)
     waypoint_idx = start_waypoint_idx
 
+    #未来報酬の特徴分離 PurePersuiteの速度変動 3) run_control_loop() 内：エピソード基準速度と更新タイマを追加
+    # ===== 速度ばらつき用の内部状態 =====
+    v_base = random.uniform(TARGET_SPEED_MIN, TARGET_SPEED_MAX)  # エピソード基準
+    v_ref_dyn = v_base
+    next_speed_update_t = 0.0
+    # ===== コースアウト回数カウント =====
+    outside = False
+    n_out = 0
+    is_first_check = True
+
+
     # 車の初期位置
     set_car_start_pos(car,start_waypoint_idx,waypoint_direc)
 
@@ -573,6 +681,7 @@ def run_control_loop(scene, car,sphere):
     # 前に進まない学習を報酬で改善
     stuck_count = 0 
 
+
 # ----- 制御ループ（例: Genesis4D の step() 内など） -----
     for step in range(20_0000):
 
@@ -597,7 +706,7 @@ def run_control_loop(scene, car,sphere):
         # 5) 速度依存ルックアヘッドを計算
 
 # これの変動が過敏すぎてターゲット位置をあらぶらせているので固定
-        L = 1.25#L if L < 1.5 else 1.5
+        L = 1.0#1.25#L if L < 1.5 else 1.5
 #        L = compute_lookahead(v=car_speed, k_la=K_LOOK, v_eps=V_EPS)
 
         # シンプルに次の通過点へ進めるモード
@@ -671,7 +780,27 @@ def run_control_loop(scene, car,sphere):
 
         #ボトルネック認識とVmax魂の注入 アクセルが負の数値になる
         # 目標速度（vmax と連携するなら min(TARGET_SPEED_BASE, limit_v_target) を使う）
-        v_ref = TARGET_SPEED
+
+        if t >= next_speed_update_t:
+
+            #未来報酬の特徴分離 PurePersuiteの速度変動 曲率計算を先に
+            kappas_H, ds_H = curvature_from_wps(WAYPOINTS, waypoint_idx, waypoint_direc,H_PREVIEW)
+            kappa_local_now = float(kappas_H[0]) if kappas_H else 0.0
+
+            # --- (B) v_ref を更新（スロットル計算の前！） ---
+            slow_factor = 1.0 / (1.0 + KAPPA_SLOW_GAIN * abs(kappa_local_now))
+            slow_factor = max(0.55, slow_factor)  # 落としすぎ防止
+
+            jitter = random.gauss(0.0, SPEED_JITTER_STD)
+            v_ref_dyn = v_base * slow_factor + jitter
+            v_ref_dyn = float(np.clip(v_ref_dyn, 3.0, TARGET_SPEED_MAX))
+            next_speed_update_t = t + SPEED_UPDATE_SEC
+
+
+#未来報酬の特徴分離 PurePersuiteの速度変動 5) PID部：固定 TARGET_SPEED を v_ref_dyn に置換        
+        v_ref = v_ref_dyn
+#        v_ref = TARGET_SPEED
+
         # PI（アンチワインドアップ付き）
         speed_error = v_ref - car_speed
         # 飽和前のコントロール
@@ -686,10 +815,12 @@ def run_control_loop(scene, car,sphere):
         )
         if allow_integrate:
             integ_speed_error += speed_error * scene.dt
+
         throttle = u_sat
         # 発進補助（停止近傍で最小トルク）
         if abs(car_speed) < 0.1 and throttle < 0.05 * FORCE_CLIP:
             throttle = 0.05 * FORCE_CLIP
+
 
         #ボトルネック認識とVmax魂の注入 3.2 
         obs = build_obs_v2_pure(
@@ -700,6 +831,28 @@ def run_control_loop(scene, car,sphere):
             vmax_model=vmax_model,
             H_preview=H_PREVIEW, mu_default=MU_DEFAULT, speed_limit=SPEED_LIMIT
         )
+
+		#未来報酬の特徴分離 PurePersuiteの速度変動
+        # -------------------------
+        # (A) コースアウト判定（ヒステリシス） & 回数カウント
+        # -------------------------
+
+        # --- 中心線からの横距離（道幅判定） ---
+        lat_dist, q_on_center = lateral_distance_to_centerline(
+            pos_xy=pos_xy,
+            waypoints_xy=WAYPOINTS[:, :2],   # (N,2)
+            idx_center=waypoint_idx,
+            direc=waypoint_direc,
+            window=40
+        )
+
+        outside_new,is_first_check = update_offtrack_from_latdist(lat_dist, outside,is_first_check)
+
+        if (not outside) and outside_new:
+            n_out += 1
+
+        outside = outside_new
+
 
         #前に進まない学習を報酬で改善 obsを作った直後に、進行度合いのカウンターを進める
         vel = float(obs[6])          # velocity
@@ -716,7 +869,9 @@ def run_control_loop(scene, car,sphere):
         reward = compute_reward_teacher(obs=obs,t=t,stuck_count=stuck_count)
         reward_total += reward
 
-        print(f"[{t:.3f}]教師 reward {reward:.2f} total {reward_total:.2f}")
+        #未来報酬の特徴分離 PurePersuiteの速度変動 確認ログ
+        print(f"[{t:.2f}]教師 rw_total {reward_total:.2f} v_ref={v_ref_dyn:.2f} v={car_speed:2.2f} kappa={kappa_local_now:.3f} throttle={throttle:.3f} lat_dist={lat_dist:.2f} out={n_out}")
+
 
         # 教師データ記録
 
@@ -759,6 +914,13 @@ def run_control_loop(scene, car,sphere):
             "throttle": float(throttle),
             "reward": float(reward),
             "reward_total": float(reward_total),
+
+            #未来報酬の特徴分離 PurePersuiteの速度変動　6) ログへ outside / n_out / v_ref を追加
+            # 追加：多目的RTG用の材料
+            "v_ref": float(v_ref_dyn),
+            "outside": float(1.0 if outside else 0.0),
+            "n_out": float(n_out),
+
             "plan_x1": float(plan_xy[0]), "plan_y1": float(plan_xy[1]),
             "plan_x2": float(plan_xy[2]), "plan_y2": float(plan_xy[3]),
             "plan_x3": float(plan_xy[4]), "plan_y3": float(plan_xy[5]),
@@ -767,6 +929,11 @@ def run_control_loop(scene, car,sphere):
 
         # 一周したらおわり
         if waypoint_idx == end_waypoint_idx or rest_time < 0.0:
+
+            #未来報酬の特徴分離 PurePersuiteの速度変動 7) ループ終了時：エピソード単位の結果をprint（確認用）
+            ep_time = t
+            print(f"[EP END] time={ep_time:.2f}s  n_out={n_out}  v_base={v_base:.2f}")
+
             # 教師データとして保存 
             df = pd.DataFrame(data_log)
             df.to_csv("expert_data/expert_data.csv", index=False)
