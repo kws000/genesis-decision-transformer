@@ -602,7 +602,9 @@ class DecisionTransformer(nn.Module):
         self.embed_timestep = nn.Embedding(timestep_vocab, embed_dim)
 #        self.embed_timestep = nn.Embedding(timestep_max, embed_dim)
         
-        self.embed_return   = nn.Linear(1, embed_dim)
+# 未来報酬の特徴分離	RTGベクトルを追加
+        self.embed_return   = nn.Linear(2, embed_dim)
+#        self.embed_return   = nn.Linear(1, embed_dim)
         self.embed_state    = nn.Linear(obs_dim, embed_dim)
         self.embed_action   = nn.Linear(act_dim, embed_dim)
 
@@ -769,6 +771,10 @@ class DecisionTransformer(nn.Module):
 #計画と行動のマルチタスクモデル
         B, T, _ = states.shape
 #       B, T = states.shape[0], states.shape[1]
+
+		# 未来報酬の特徴分離	RTGベクトルを追加
+        if returns.shape[-1] != 2:
+            raise RuntimeError(f"[DecisionTransformer] returns_vec must be (B,T,2), got {returns.shape}")
 
 #ボトルネック認識とVmax魂の注入 1.2 forward：型埋め込みを加算＋安全チェック
         # 形の安全チェック（obs拡張後は 19 次元が期待）

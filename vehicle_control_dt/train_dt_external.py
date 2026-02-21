@@ -20,7 +20,7 @@ CHECKPOINT_DIR = "checkpoints"
 #計画と行動のマルチタスクモデル
 BATCH_SIZE = 64
 LR = 1e-3
-EPOCHS = 50 #※いまだけ削減
+EPOCHS = 30#50 #※いまだけ削減
 K_WP = 40
 PLAN_M = 3
 W_ACT = 1.0
@@ -129,7 +129,11 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
             t = torch.zeros(B, T, dtype=torch.long, device=DEVICE)
             s = torch.zeros(B, T, model.obs_dim, device=DEVICE)
             a = torch.zeros(B, T, model.act_dim, device=DEVICE)
-            r = torch.zeros(B, T, 1,             device=DEVICE)
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+            r = torch.zeros(B, T, 2, device=DEVICE)  # returns_vec: (Progress, Clean)
+#            r = torch.zeros(B, T, 1,             device=DEVICE)
+
             pa, _, _ = model(t, s, a, r, wp=None, return_plan=False)
             print(f"[PROBE {tag}] zero-input pred =", pa[0, 0].detach().cpu().numpy())  # steer, throttle
             print(f"[PROBE {tag}] head.bias      =", model.predict_action.bias.detach().cpu().numpy())
@@ -176,7 +180,7 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
             timesteps = timesteps.to(DEVICE).long()
             states    = states.to(DEVICE).float()
             actions   = actions.to(DEVICE).float()
-            returns   = returns.to(DEVICE).float()
+            returns   = returns.to(DEVICE).float() # 未来報酬の特徴分離	RTGベクトルを追加 (B,T,2) 前提になった
 
 #ボトルネック認識とVmax魂の注入 6.1 WPなしガード（K=0 のケース） 
             wp_in = None
@@ -194,13 +198,21 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
 #                                                    wp=wp, return_plan=True, return_focus=USE_FOCUS)
             # 行動損失（RTG重み付きBC）
 
-#ボトルネック認識とVmax魂の注入 アクセルが負の数値になる zscore廃止
-            w = weight_from_returns(returns, floor=0.2).expand_as(actions)
-            #教師アクションと予測アクションの差が行動損失
+# 未来報酬の特徴分離	cleanを模倣重みに入れる
+            rtg_p = returns[..., 0:1]        # progress
+            rtg_c = returns[..., 1:2]        # clean
+            w_p = weight_from_returns(rtg_p, floor=0.2)          # (B,T,1)
+            w_c = torch.clamp(rtg_c, 0.0, 1.0)                   # 例：cleanが[0,1]に正規化されている前提
+            w = (w_p * w_c).expand_as(actions)
             L_act = (w * (pred_actions - actions) ** 2).mean()
-#            w = _zscore_nonneg(returns)  # (B,T,1)
-#            w = w.expand_as(actions)     # (B,T,2)
+## 未来報酬の特徴分離	RTGベクトルを追加
+#            rtg_progress = returns[..., 0:1]  # (B,T,1)
+#            w = weight_from_returns(rtg_progress, floor=0.2).expand_as(actions)
 #            L_act = (w * (pred_actions - actions) ** 2).mean()
+##            #ボトルネック認識とVmax魂の注入 アクセルが負の数値になる zscore廃止
+##            w = weight_from_returns(returns, floor=0.2).expand_as(actions)
+##            #教師アクションと予測アクションの差が行動損失
+##            L_act = (w * (pred_actions - actions) ** 2).mean()
 
             # 計画損失　
             #※planがないことを想定する必要はない            
@@ -272,12 +284,22 @@ def train_external(context_len, n_layer, n_head,norm_path,pkl_path,checkpoint_pa
 #前に進まなくなった直接の原因	非正規化
             viol_rate = (vel_phys > vlim_phys).float().mean().item()
 #            viol_rate = (vel > vlim).float().mean().item()
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+            prog_mean  = returns[..., 0].mean().item()
+            clean_mean = returns[..., 1].mean().item()
             print(
                 f"Epoch {epoch+1:03d} | L={avg_loss:.5f} "
-                f"| L_act={L_act.item():.4f} | L_plan={L_plan.item():.4f} "
-                f"| L_smooth={L_smooth.item():.4f} | L_sm={L_sm.item():.4f} "
-                f"| viol={viol_rate:.3f}"
+                f"| L_act={L_act.item():.4f} | L_plan={L_plan.item():.3f} "
+                f"| L_smooth={L_smooth.item():.4f} | L_sm={L_sm.item():.3f} "
+                f"| viol={viol_rate:.2f} | prog={prog_mean:.3f} clean={clean_mean:.3f}"
             )
+#            print(
+#                f"Epoch {epoch+1:03d} | L={avg_loss:.5f} "
+#                f"| L_act={L_act.item():.4f} | L_plan={L_plan.item():.4f} "
+#                f"| L_smooth={L_smooth.item():.4f} | L_sm={L_sm.item():.4f} "
+#                f"| viol={viol_rate:.3f}"
+#            )
 
     # 保存
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)

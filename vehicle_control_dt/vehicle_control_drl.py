@@ -190,7 +190,7 @@ PLAN_LA_MAX = 3.0#30.0  # [m]
 #未来報酬の特徴分離 PurePersuiteの速度変動 1)追加：速度ばらつき・コースアウト計測パラメータ
 
 # ===== 速度ばらつき（DTのための分岐生成）=====
-TARGET_SPEED_MIN = 8.0     # [m/s] エピソード基準速度の下限
+TARGET_SPEED_MIN = 6.0     # [m/s] エピソード基準速度の下限
 TARGET_SPEED_MAX = 14.0    # [m/s] 上限
 SPEED_JITTER_STD = 0.6     # [m/s] 区間ごとの揺らぎ（同コーナーでの進入差を作る）
 SPEED_UPDATE_SEC = 0.6     # [s]   どれくらいの頻度で目標速度を更新するか
@@ -681,6 +681,11 @@ def run_control_loop(scene, car,sphere):
     # 前に進まない学習を報酬で改善
     stuck_count = 0 
 
+	# 未来報酬の特徴分離	教師CSVに「エピソード終端の集計値」を入れる
+    ep_time = 0.0
+    ep_n_out = 0
+    ep_success = 0
+
 
 # ----- 制御ループ（例: Genesis4D の step() 内など） -----
     for step in range(20_0000):
@@ -932,10 +937,21 @@ def run_control_loop(scene, car,sphere):
 
             #未来報酬の特徴分離 PurePersuiteの速度変動 7) ループ終了時：エピソード単位の結果をprint（確認用）
             ep_time = t
+
+			# 未来報酬の特徴分離	教師CSVに「エピソード終端の集計値」を入れる
+            ep_n_out = n_out
+            ep_success = 1#（時間切れ/周回で終了したなら1。途中で中断するなら条件分け）
+
             print(f"[EP END] time={ep_time:.2f}s  n_out={n_out}  v_base={v_base:.2f}")
 
             # 教師データとして保存 
             df = pd.DataFrame(data_log)
+
+			# 未来報酬の特徴分離	教師CSVに「エピソード終端の集計値」を入れる
+            df["ep_time"] = ep_time
+            df["ep_n_out"] = ep_n_out
+            df["ep_success"] = ep_success
+
             df.to_csv("expert_data/expert_data.csv", index=False)
             return
         

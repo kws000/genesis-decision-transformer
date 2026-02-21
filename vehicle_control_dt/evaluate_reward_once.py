@@ -153,7 +153,11 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
         t = torch.zeros(B, T, dtype=torch.long, device=DEVICE)
         s = torch.zeros(B, T, model.obs_dim, device=DEVICE)
         a = torch.zeros(B, T, model.act_dim, device=DEVICE)
-        r = torch.zeros(B, T, 1,             device=DEVICE)
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+        r = torch.zeros(B, T, 2,             device=DEVICE)
+#        r = torch.zeros(B, T, 1,             device=DEVICE)
+        
         # WPは何も与えない（分布影響を切り分けるため）
         pa0, _, _ = model(t, s, a, r, wp=None, return_plan=False)
         print("[CHK] zero-input pred =", pa0[0, 0].detach().cpu().numpy())

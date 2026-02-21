@@ -184,24 +184,29 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-#計画と行動のマルチタスクモデル
-        rets = sample["returns"]
-        if rets.ndim == 1:
-            rets = rets[:, None]  # (T,) -> (T,1)
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+        rets = sample["returns"]  # (T,2) だけ
         return (
-            torch.tensor(sample["states"],    dtype=torch.float32),  # (T, obs_dim)
-            torch.tensor(sample["actions"],   dtype=torch.float32),  # (T, act_dim)
-            torch.tensor(rets,                dtype=torch.float32),  # (T, 1)
-            torch.tensor(sample["timesteps"], dtype=torch.long),     # (T,)
-            torch.tensor(sample["wp"],        dtype=torch.float32),  # (K, 5)
-            torch.tensor(sample["plan"],      dtype=torch.float32),  # (2*PLAN_M,)
+            torch.tensor(sample["states"],    dtype=torch.float32),
+            torch.tensor(sample["actions"],   dtype=torch.float32),
+            torch.tensor(rets,                dtype=torch.float32),  # (T,2)
+            torch.tensor(sample["timesteps"], dtype=torch.long),
+            torch.tensor(sample["wp"],        dtype=torch.float32),
+            torch.tensor(sample["plan"],      dtype=torch.float32),
         )
-#       return (
-#           torch.tensor(sample["states"], dtype=torch.float32),       # (context_len, obs_dim)
-#           torch.tensor(sample["actions"], dtype=torch.float32),      # (context_len, act_dim)
-#           torch.tensor(sample["returns"], dtype=torch.float32),      # (context_len, 1)
-#           torch.tensor(sample["timesteps"], dtype=torch.long),       # (context_len,)
-#       )
+#        #計画と行動のマルチタスクモデル
+#        rets = sample["returns"]
+#        if rets.ndim == 1:
+#            rets = rets[:, None]  # (T,) -> (T,1)
+#        return (
+#            torch.tensor(sample["states"],    dtype=torch.float32),  # (T, obs_dim)
+#            torch.tensor(sample["actions"],   dtype=torch.float32),  # (T, act_dim)
+#            torch.tensor(rets,                dtype=torch.float32),  # (T, 1)
+#            torch.tensor(sample["timesteps"], dtype=torch.long),     # (T,)
+#            torch.tensor(sample["wp"],        dtype=torch.float32),  # (K, 5)
+#            torch.tensor(sample["plan"],      dtype=torch.float32),  # (2*PLAN_M,)
+#        )
 
 
 

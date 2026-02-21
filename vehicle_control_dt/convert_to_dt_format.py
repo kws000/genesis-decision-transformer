@@ -13,6 +13,16 @@ os.makedirs("data_dt", exist_ok=True)
 # ── ハイパラ ─────────────────────────────────────────────
 TIMESTEP_MAX = 4096  # 位置埋め込みの語彙上限と揃える（例）
 
+# 未来報酬の特徴分離	RTGベクトルを追加
+# ── 多目的RTG（終端評価→全時刻へブロードキャスト） ──
+# Clean = exp(-LAM_OUT * n_out)
+LAM_OUT = 0.35
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+# Progress = exp(-K_TIME * ep_time)
+# ep_time(秒)のスケールに合わせて調整（例：10〜30秒なら0.06前後）
+K_TIME = 0.06
+
 # ── OBS V2 スキーマ（参照用/検証用） ─────────────────────
 OBS_V2_DIM = 19  # 既存10 + VMAX塊9
 
@@ -37,7 +47,10 @@ def main():
         # まれに dict1本のケースに保険
         raw = [raw]
 
-    observations, actions, returns, plans = [], [], [], []
+# 未来報酬の特徴分離	RTGベクトルを追加
+    observations, actions, returns_vec, plans = [], [], [], []
+#    observations, actions, returns, plans = [], [], [], []
+
     have_plan = False
 
     for traj in raw:
@@ -58,6 +71,16 @@ def main():
             rtg[i] = acc
         rtg = rtg.reshape(-1, 1)
 
+		# 未来報酬の特徴分離	RTGベクトルを追加
+        # ── 多目的RTG（Progress, Clean） ───────────────────────
+        # expert_csv_to_pkl.py で必ず入る前提：ep_time, n_out
+        ep_time = float(traj["ep_time"])
+        n_out   = float(traj["n_out"])
+        progress_score = float(np.exp(-K_TIME * ep_time))
+        clean_score    = float(np.exp(-LAM_OUT * n_out))
+        rtg_vec = np.tile(np.array([progress_score, clean_score], dtype=np.float32), (obs.shape[0], 1))
+
+
         # plan
         if pln is not None:
             pln = _ensure_2d(np.asarray(pln, dtype=np.float32))  # (T, 2M)
@@ -67,20 +90,30 @@ def main():
 
         observations.append(obs)
         actions.append(act)
-        returns.append(rtg)
+# 未来報酬の特徴分離	RTGベクトルを追加
+        returns_vec.append(rtg_vec)
+#        returns.append(rtg)
 
     # ── 正規化統計 ──────────────────────────────────────
 
 #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
     all_obs  = np.concatenate(observations, axis=0).astype(np.float32)  # (∑T, 19)
-    all_rtg  = np.concatenate(returns, axis=0).astype(np.float32)       # (∑T, 1)
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+    all_rtg_vec = np.concatenate(returns_vec, axis=0).astype(np.float32)  # (∑T, 2)
+#    all_rtg  = np.concatenate(returns, axis=0).astype(np.float32)       # (∑T, 1)
+
     all_plan = np.concatenate(plans, axis=0).astype(np.float32) if have_plan else None
 #    all_obs = np.concatenate(observations, axis=0)     # (∑T, 19)
 #    all_rtg = np.concatenate(returns, axis=0)          # (∑T, 1)
 #    all_plan = np.concatenate(plans, axis=0) if have_plan else None
 
     _finite_or_raise("observations", all_obs)
-    _finite_or_raise("returns", all_rtg)
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+    _finite_or_raise("returns_vec", all_rtg_vec)
+#    _finite_or_raise("returns", all_rtg)
+
     if have_plan:
         _finite_or_raise("plan", all_plan)
 
@@ -120,11 +153,14 @@ def main():
 
     # RTGはバッチ正規化用途：ここでは全体で標準化（1次元）
 
-#ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
-    ret_mean = all_rtg.mean(axis=0).astype(np.float32)   # shape (1,)
-    ret_std  = all_rtg.std(axis=0).astype(np.float32) + 1e-6
-#    ret_mean = all_rtg.mean(axis=0)
-#    ret_std  = all_rtg.std(axis=0) + 1e-6
+
+# 未来報酬の特徴分離	RTGベクトルを追加
+    retv_mean = all_rtg_vec.mean(axis=0).astype(np.float32)          # (2,)
+    retv_std  = all_rtg_vec.std(axis=0).astype(np.float32) + 1e-6    # (2,)
+#    #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
+#    ret_mean = all_rtg.mean(axis=0).astype(np.float32)   # shape (1,)
+#    ret_std  = all_rtg.std(axis=0).astype(np.float32) + 1e-6
+
 
     if have_plan:
 #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
@@ -138,21 +174,37 @@ def main():
     for i in range(len(observations)):
         obs = observations[i]                           # (T, 19)
         act = actions[i]                                # (T, A)
-        rtg = returns[i]                                # (T, 1)
+# 未来報酬の特徴分離	RTGベクトルを追加
+        rtg_v = returns_vec[i]  # (T,2) 非正規化
+#        rtg = returns[i]                                # (T, 1)
 
         obs_norm = (obs - obs_mean) / obs_std
-        rtg_norm = (rtg - ret_mean) / ret_std
+
+# 未来報酬の特徴分離	RTGベクトルを追加　z-score をやめてそのまま使う
+        rtg_v_norm = rtg_v
+#        rtg_norm = (rtg - ret_mean) / ret_std
 
         T = obs.shape[0]
         timesteps = (np.arange(T, dtype=np.int64) % TIMESTEP_MAX)
 
+
+# 未来報酬の特徴分離	RTGベクトルを追加 ここでrtg_vを吸収したので以降は以前通り
         item = {
             "observations": obs_norm.astype(np.float32),
             "actions":      act.astype(np.float32),
-            "returns":      rtg_norm.astype(np.float32),
+            "returns":      rtg_v_norm.astype(np.float32),   # (T,2) ← これだけ
             "timesteps":    timesteps,
-            "initial_rtg":  rtg[:1].copy().astype(np.float32),  # 非正規化の先頭RTG（参照用）
+            "initial_rtg":  rtg_v_norm[:1].copy().astype(np.float32),  # (1,2) 正規化済み
         }
+#        item = {
+#            "observations": obs_norm.astype(np.float32),
+#            "actions":      act.astype(np.float32),
+#            "returns":      rtg_norm.astype(np.float32),
+#            "timesteps":    timesteps,
+#            "initial_rtg":  rtg[:1].copy().astype(np.float32),  # 非正規化の先頭RTG（参照用）
+#        }
+
+
         if have_plan:
             item["plan"] = plans[i].astype(np.float32)          # (T, 2M)
 
@@ -169,8 +221,13 @@ def main():
     out_stats = {
         "obs_mean": obs_mean.astype(np.float32),
         "obs_std":  obs_std.astype(np.float32),
-        "ret_mean": ret_mean.astype(np.float32),
-        "ret_std":  ret_std.astype(np.float32),
+# 未来報酬の特徴分離	RTGベクトルを追加
+        "ret_mean": retv_mean.astype(np.float32),
+        "ret_std":  retv_std.astype(np.float32),
+        "ret_dim":   2,
+#        "ret_mean": ret_mean.astype(np.float32),
+#        "ret_std":  ret_std.astype(np.float32),
+
 #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 原因改善
 #        "count":    int(count_prev + count_new),
         "obs_version": "v2",

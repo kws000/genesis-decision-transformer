@@ -50,6 +50,11 @@ def main():
     # --- reward (N,) ---
     rew = df["reward"].to_numpy(np.float32)
 
+    # 未来報酬の特徴分離	RTGベクトルを追加
+    # --- episode meta (optional) ---
+    ep_time  = float(df["ep_time"].iloc[0])
+    ep_n_out = int(df["ep_n_out"].iloc[0])   # 全行同じなので先頭でOK
+
     # --- plan (N,2*M) を [x1,y1,x2,y2,x3,y3] の順で作る ---
     plan = np.empty((len(df), 2*PLAN_M), dtype=np.float32)
     for i in range(PLAN_M):
@@ -82,6 +87,9 @@ def main():
         "obs_keys": OBS_V2_KEYS,
         "act_keys": ACT_KEYS,
         "plan_M": PLAN_M,
+        # 未来報酬の特徴分離	RTGベクトルを追加
+        "ep_time": ep_time,
+        "n_out": ep_n_out,
     }
     with open(OUTPUT_PKL, "wb") as f:
         pickle.dump([trajectory], f, protocol=pickle.HIGHEST_PROTOCOL)
