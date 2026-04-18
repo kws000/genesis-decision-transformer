@@ -159,6 +159,7 @@ class GenesisScene:
         self.reward_total = 0.0
 
         self.zero_throttle_time = 0.0
+        self.zero_speed_time = 0.0
 
         #ボトルネック認識とVmax魂の注入
         self.vmax_model = VmaxFactorized(g=9.80665, safety=0.85, r_clip=1000.0, device="cpu")
@@ -377,6 +378,7 @@ class GenesisScene:
         else:
             return False, current_wp_idx
 
+
     def _load_car(self):
         return self.scene.add_entity(
             gs.morphs.MJCF(file=str("xml/simple_car.xml"), scale=1.0),
@@ -433,6 +435,7 @@ class GenesisScene:
         self.reward_total = 0.0
 
         self.zero_throttle_time = 0.0
+        self.zero_speed_time = 0.0
 
 #        # 最初からワイヤーにしたい
 #        if self.scene.viewer is not None:
@@ -510,19 +513,30 @@ class GenesisScene:
         elif self.reward_total < -250:
             # 大きく損失していてもう回復が見込みめない
             done = True
-        elif self.zero_throttle_time > 10.0:
+        elif self.zero_throttle_time > 1.0:
             # ずっとアクセルを踏んでいない
             reward -= 100
             # ペナルティは払ったのでクリアする
             self.zero_throttle_time = 0.0
 #            done = True
+        elif self.zero_speed_time > 1.0:
+            # ずっとアクセルを踏んでいない
+            reward -= 100
+            # ペナルティは払ったのでクリアする
+            self.zero_speed_time = 0.0
+#            done = True
 
         # アクセルを踏んでいない時間
-        if throttle <=0.002:
-            self.zero_throttle_time += self.t
+        if throttle <=0.05:
+            self.zero_throttle_time += self.dt
         else:
             self.zero_throttle_time = 0.0
             
+        # 速度が出ていない時間
+        if obs[6] <=0.5:
+            self.zero_speed_time += self.dt
+        else:
+            self.zero_speed_time = 0.0
 
         self.reward_total += reward
 
@@ -778,36 +792,19 @@ class GenesisScene:
                 radius=0.005, color=(0, 1, 0, 0.5))  # Green
 
 
+#前に進まないので調査
+
         # ヘディング誤差（-pi ～ +pi に wrap）
         # ※車体とターゲット方向の角度差
         heading_error = target_yaw - yaw
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
-        # CTE（ターゲット方向に直交する方向への距離）
-        # ※道路と
-
-        # wp0 = current segment start, wp1 = segment end
-
-        # perp_dir 計算間違ってる？
-        is_perp_bugfix = True
-
-        if is_perp_bugfix:
-            target_dir = target_wp - pos
-            target_dir = target_dir / np.linalg.norm(target_dir)
-            segment_dir = segment / np.linalg.norm(segment)
-            inner_angle = np.dot(target_dir, segment_dir)
-            # 1.0 0.0 -1.0
-            # ↓ x 1.0
-            # -1.0 0.0 1.0
-            # ↓ + 1.0
-            # 0.0 1.0 2.0   ※真正面で0.0　真横で1.0 真後ろで2.0
-            perp_error = 1.0 - inner_angle
-        else:
-            rel_pos = pos - target_wp
-            # segment に直交するベクトル
-            perp_dir = np.array([-segment[1], segment[0]])  # [-dy, dx]
-            perp_dir = perp_dir / np.linalg.norm(perp_dir)
-            perp_error = np.dot(rel_pos, perp_dir)
+        # perp_errorは道路方向とのずれ
+        target_dir = target_wp - pos
+        target_dir = target_dir / np.linalg.norm(target_dir)
+        segment_dir = segment / np.linalg.norm(segment)
+        inner_angle = np.dot(target_dir, segment_dir)
+        perp_error = 1.0 - inner_angle
 
         #まだチェックポイント上に乗っていないのでコースアウトは無視する
         if self.waypoint_idx == self.start_waypoint_idx:
@@ -862,9 +859,9 @@ class GenesisScene:
         speed_limit    = float("inf")   # TODO: マップ側から取得
         limit_v_target = float(min(speed_limit, vmax_min_hH))
 
-        print(f"[VMAX] vel={vel:.3f}  vmax_local={vmax_local:.3f}  "
-            f"vmax_min_hH={vmax_min_hH:.3f}  limit_v_target={limit_v_target:.3f}  "
-            f"v_ratio={float(vel)/(vmax_local+1e-3):.3f}  headroom={vmax_local-float(vel):.3f}")
+#        print(f"[VMAX] vel={vel:.3f}  vmax_local={vmax_local:.3f}  "
+#            f"vmax_min_hH={vmax_min_hH:.3f}  limit_v_target={limit_v_target:.3f}  "
+#            f"v_ratio={float(vel)/(vmax_local+1e-3):.3f}  headroom={vmax_local-float(vel):.3f}")
 
         # 8) 既存10次元（obs10）を先に構築してある前提
         #   obs10 = np.array([target_wp_relative_x, target_wp_relative_y, pos[0], pos[1],
@@ -938,6 +935,9 @@ class GenesisScene:
 #        reward -= 0.05 * abs(he)                   # 向きのズレも罰する
 #        reward += 1 if passed else 0
 
+        # さすがに出しすぎ
+        if speed > 300.0:
+            reward -= 10.0
         # 逆走など明らかに異常な場合に罰則
         if speed < -0.1:
             reward -= 1.0

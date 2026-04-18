@@ -3,6 +3,10 @@ import numpy as np, pandas as pd, pickle, os
 #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ
 from schema import OBS_COLS, ACT_COLS, PLAN_COLS, REWARD_COL
 
+#進化ループの大改修	正規化の固定統計
+BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
+
+
 def probe_csv(path="expert_data/expert_data.csv"):
     import pandas as pd
     print(f"[PROBE/CSV] load: {path}")
@@ -42,8 +46,9 @@ def probe_raw_pkl(path="trajectories/trajectory_data.pkl"):
         if np.isnan(a).any(): raise RuntimeError(f"[PROBE/RAW] NaN in {k}")
     print("[PROBE/RAW] ok.")
 
+
 #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ
-def probe_dt(path_data="data_dt/trajectories_dt.pkl", path_norm="data_dt/mean_std.pkl"):
+def probe_dt(path_data="data_dt/trajectories_dt.pkl", path_norm={BASE_NORM_PKL}):
     print(f"[PROBE/DT] load: {path_data}")
     with open(path_data,"rb") as f:
         D = pickle.load(f)

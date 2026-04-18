@@ -154,7 +154,7 @@ def generate_bernoulli_waypoints(
 # システム
 
 # ビュアーやSleepをスキップする高速モード
-is_mode_fast = False#True#False
+is_mode_fast = True#False#True#False
 
 # 経路情報
 WAYPOINTS = generate_bernoulli_waypoints(a=2.0) # 0.5 m matches the OBJ
@@ -191,7 +191,7 @@ PLAN_LA_MAX = 3.0#30.0  # [m]
 
 # ===== 速度ばらつき（DTのための分岐生成）=====
 TARGET_SPEED_MIN = 6.0     # [m/s] エピソード基準速度の下限
-TARGET_SPEED_MAX = 14.0    # [m/s] 上限
+TARGET_SPEED_MAX = 12.0    # [m/s] 上限
 SPEED_JITTER_STD = 0.6     # [m/s] 区間ごとの揺らぎ（同コーナーでの進入差を作る）
 SPEED_UPDATE_SEC = 0.6     # [s]   どれくらいの頻度で目標速度を更新するか
 
@@ -855,6 +855,9 @@ def run_control_loop(scene, car,sphere):
 
         if (not outside) and outside_new:
             n_out += 1
+        elif (outside and (not is_first_check) and (lat_dist >5.0)):
+            #初回以外でoutが大きすぎる場合は極値に
+            n_out = 10
 
         outside = outside_new
 

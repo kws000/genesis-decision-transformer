@@ -9,6 +9,9 @@ import re
 
 PREVIEW_STEP_ID = 6
 
+#進化ループの大改修	正規化の固定統計
+BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
+
 # --- ハイパーパラメータステップ定義 ---
 step_configs = [
     {"context_len": 1, "n_layer": 3, "n_head": 4},
@@ -61,7 +64,8 @@ def Preview():
         "python", "visualize_dt_attention.py",
         "--checkpoint",    f"checkpoints/step{step_id}.pt",
         "--pkl",           f"checkpoints/step{step_id}_trajectories_dt.pkl",
-        "--norm_path",     f"checkpoints/step{step_id}_mean_std.pkl",
+        #進化ループの大改修	正規化の固定統計
+        "--norm_path",     BASE_NORM_PKL,
         "--context_len",   str(step_config["context_len"]),
         "--n_layer",       str(step_config["n_layer"]),
         "--n_head",        str(step_config["n_head"]),

@@ -8,7 +8,9 @@ import pickle
 
 # === 設定 ===
 csv_path = "expert_data/expert_data.csv"
-norm_path = "data_dt/mean_std.pkl"
+
+#進化ループの大改修	正規化の固定統計
+BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
 
 # === CSVから観測ベクトルを生成 ===
 df = pd.read_csv(csv_path)
@@ -34,8 +36,8 @@ new_std = obs.std(axis=0) + 1e-6
 new_count = obs.shape[0]
 
 # === 前回統計量を読み込み（なければ初期化） ===
-if os.path.exists(norm_path):
-    with open(norm_path, "rb") as f:
+if os.path.exists(BASE_NORM_PKL):
+    with open(BASE_NORM_PKL, "rb") as f:
         prev = pickle.load(f)
     prev_mean = prev["obs_mean"]
     prev_std = prev["obs_std"]
@@ -51,8 +53,8 @@ merged_mean = (prev_mean * prev_count + new_mean * new_count) / total_count
 merged_std = np.maximum(prev_std, new_std)
 
 # === 保存 ===
-os.makedirs(os.path.dirname(norm_path), exist_ok=True)
-with open(norm_path, "wb") as f:
+os.makedirs(os.path.dirname(BASE_NORM_PKL), exist_ok=True)
+with open(BASE_NORM_PKL, "wb") as f:
     pickle.dump({
         "obs_mean": merged_mean,
         "obs_std": merged_std,

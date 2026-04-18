@@ -18,6 +18,9 @@ USE_FIXED_RTG = True
 # 時間最大
 TIMESTEP_MAX = 4000
 
+#進化ループの大改修	正規化の固定統計
+BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
+
 ## DTのMLP化検証
 #context_len = 1
 
@@ -53,10 +56,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model_path = "models/decision_transformer.pt"
 pkl_path = "data_dt/trajectories_dt.pkl"
-norm_path = "data_dt/mean_std.pkl"
 
 # === 統計情報の読み込み ===
-with open(norm_path, "rb") as f:
+with open(BASE_NORM_PKL, "rb") as f:
     stats = pickle.load(f)
 obs_mean, obs_std = stats["obs_mean"], stats["obs_std"]
 rtg_mean, rtg_std = stats["ret_mean"], stats["ret_std"]

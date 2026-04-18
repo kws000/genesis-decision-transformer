@@ -19,6 +19,8 @@ from gymnasium import spaces
 import numpy as np
 from typing import Optional, Dict, Tuple
 
+import os, json
+
 TIMESTEP_MAX = 4000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -26,11 +28,16 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 K_WP = 40
 PLAN_M = 3
 
+#進化ループの大改修	正規化の固定統計
+BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
 
 # ここで暫定モデル temp_model.pt がロードされる
 CHECKPOINT_PATH = "checkpoints/temp_model.pt"
-PKL_PATH = "data_dt/trajectories_dt.pkl"
-NORM_PATH = "data_dt/mean_std.pkl"
+
+
+#進化ループの大改修	推論側 パス定数廃止
+#PKL_PATH = "data_dt/trajectories_dt.pkl"
+#NORM_PATH = "data_dt/mean_std.pkl"
 
 INITIAL_RTG = 100.0
 USE_FIXED_RTG = True
@@ -92,6 +99,46 @@ class Normalizer:
 #
 #    def normalize_rtg(self, rtg):
 #        return (rtg - self.rtg_mean) / (self.rtg_std + 1e-8)
+
+
+def resolve_snapshot_paths(root_dir="data_dt", ds_id="auto"):
+    collection_path = os.path.join(root_dir, "ds_collection.json")
+    blender_path = os.path.join(root_dir, "ds_blender.json")
+
+    with open(collection_path, "r", encoding="utf-8") as f:
+        col = json.load(f)
+    with open(blender_path, "r", encoding="utf-8") as f:
+        bl = json.load(f)
+
+    # ds_id auto: snapshot_mix 先頭
+    if ds_id == "auto":
+        snap_mix = bl.get("snapshot_mix", [])
+        if not snap_mix:
+            raise RuntimeError("ds_blender.json snapshot_mix is empty")
+        ds_id = snap_mix[0]["ds_id"]
+
+    # ds_id -> path を ds_collection から引く
+    path_map = {}
+    for s in col.get("snapshots", []):
+        path_map[s["ds_id"]] = s.get("path", f"snapshots/{s['ds_id']}")
+
+    rel = path_map.get(ds_id, f"snapshots/{ds_id}")
+    snap_dir = os.path.join(root_dir, rel)
+
+    traj_pkl = os.path.join(snap_dir, "trajectories_dt.pkl")
+#進化ループの大改修	正規化の固定統計 一度作ったら二度と更新してはいけない
+#    norm_pkl = os.path.join(snap_dir, "mean_std.pkl")
+
+
+    if not os.path.exists(traj_pkl):
+        raise FileNotFoundError(f"missing trajectories_dt.pkl: {traj_pkl}")
+#進化ループの大改修	正規化の固定統計 一度作ったら二度と更新してはいけない
+#    if not os.path.exists(norm_pkl):
+#        raise FileNotFoundError(f"missing mean_std.pkl: {norm_pkl}")
+
+#進化ループの大改修	正規化の固定統計 一度作ったら二度と更新してはいけない
+    return ds_id, traj_pkl,BASE_NORM_PKL
+#    return ds_id, traj_pkl, norm_pkl
 
 
 #最新モデルでリプレイする　別手法
@@ -329,24 +376,33 @@ if __name__ == "__main__":
     if ignore_arg:
 
         # 即時確認用
-#最新モデルでリプレイする　別手法
-        score = run_inference_once(1,2,4,NORM_PATH,PKL_PATH,CHECKPOINT_PATH)
-#        score = run_inference_once(1,2,4)
 
+#進化ループの大改修	推論側
+        ds_id, pkl_path, norm_path = resolve_snapshot_paths("data_dt")
+        print(f"[EVAL] using {ds_id}  pkl={pkl_path}  norm={norm_path}")
+        score = run_inference_once(1,2,4,norm_path,pkl_path,CHECKPOINT_PATH)
+#        score = run_inference_once(1,2,4,NORM_PATH,PKL_PATH,CHECKPOINT_PATH)
 
         print(f"評価スコア: {score:.2f}")
         with open("eval_score.txt", "w") as f:
             f.write(str(score))
 
     else:
+
+#進化ループの大改修	推論側        
         parser = argparse.ArgumentParser()
         parser.add_argument("--context_len", type=int, required=True)
         parser.add_argument("--n_layer", type=int, required=True)
         parser.add_argument("--n_head", type=int, required=True)
-        #最新モデルでリプレイする　別手法
-        parser.add_argument("--norm_path", type=str, required=True)
-        parser.add_argument("--pkl_path", type=str, required=True)
         parser.add_argument("--checkpoint_path", type=str, required=True)
+#        parser = argparse.ArgumentParser()
+#        parser.add_argument("--context_len", type=int, required=True)
+#        parser.add_argument("--n_layer", type=int, required=True)
+#        parser.add_argument("--n_head", type=int, required=True)
+#        #最新モデルでリプレイする　別手法
+#        parser.add_argument("--norm_path", type=str, required=True)
+#        parser.add_argument("--pkl_path", type=str, required=True)
+#        parser.add_argument("--checkpoint_path", type=str, required=True)
 
         args = parser.parse_args()
 
@@ -354,16 +410,28 @@ if __name__ == "__main__":
 
         if ignore_error:
             # 例外無視用
+
+#進化ループの大改修	推論側
+            ds_id, pkl_path, norm_path = resolve_snapshot_paths("data_dt")
+            print(f"[EVAL] using {ds_id}  pkl={pkl_path}  norm={norm_path}")
             score = run_inference_once(args.context_len, args.n_layer, args.n_head,
-                                        args.norm_path,args.pkl_path,args.checkpoint_path)
+                                        norm_path,pkl_path,args.checkpoint_path)
+#            score = run_inference_once(args.context_len, args.n_layer, args.n_head,
+#                                        args.norm_path,args.pkl_path,args.checkpoint_path)
+
             print(f"評価スコア: {score:.2f}")
             with open("eval_score.txt", "w") as f:
                 f.write(str(score))
         else:
             # 例外厳密に処理
             try:
+#進化ループの大改修	推論側
+                ds_id, pkl_path, norm_path = resolve_snapshot_paths("data_dt")
+                print(f"[EVAL] using {ds_id}  pkl={pkl_path}  norm={norm_path}")
                 score = run_inference_once(args.context_len, args.n_layer, args.n_head,
-                                           args.norm_path,args.pkl_path,args.checkpoint_path)
+                                           norm_path,pkl_path,args.checkpoint_path)
+#                score = run_inference_once(args.context_len, args.n_layer, args.n_head,
+#                                           args.norm_path,args.pkl_path,args.checkpoint_path)
                 print(f"評価スコア: {score:.2f}")
                 with open("eval_score.txt", "w") as f:
                     f.write(str(score))
