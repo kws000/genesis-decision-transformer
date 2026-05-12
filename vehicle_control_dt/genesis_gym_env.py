@@ -719,6 +719,24 @@ class GenesisScene:
             )
             self.debug_plan_arrows.append(debug_obj)
 
+    def compute_perp_error(self,pos, wp0, wp1, lane_half_width=2.0):
+        segment = wp1 - wp0
+        seg_len = np.linalg.norm(segment)
+
+        if seg_len < 1e-6:
+            return 0.0
+
+        seg_dir = segment / seg_len
+        rel = pos - wp0
+
+        # 符号付き横ずれ[m]
+        signed_dist = rel[0] * seg_dir[1] - rel[1] * seg_dir[0]
+
+        # 車線半幅で正規化
+        perp_error = signed_dist / lane_half_width
+
+        return float(perp_error)
+
     def _get_obs(self):
 
         # — DOF index —
@@ -799,12 +817,14 @@ class GenesisScene:
         heading_error = target_yaw - yaw
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
-        # perp_errorは道路方向とのずれ
-        target_dir = target_wp - pos
-        target_dir = target_dir / np.linalg.norm(target_dir)
-        segment_dir = segment / np.linalg.norm(segment)
-        inner_angle = np.dot(target_dir, segment_dir)
-        perp_error = 1.0 - inner_angle
+#perp_errorを本来の道幅からのずれ具合に
+        perp_error = self.compute_perp_error(pos, target_wp, target_next_wp, lane_half_width=2.0)
+#        # perp_errorは道路方向とのずれ
+#        target_dir = target_wp - pos
+#        target_dir = target_dir / np.linalg.norm(target_dir)
+#        segment_dir = segment / np.linalg.norm(segment)
+#        inner_angle = np.dot(target_dir, segment_dir)
+#        perp_error = 1.0 - inner_angle
 
         #まだチェックポイント上に乗っていないのでコースアウトは無視する
         if self.waypoint_idx == self.start_waypoint_idx:

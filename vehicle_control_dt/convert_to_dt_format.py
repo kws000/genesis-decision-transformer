@@ -365,11 +365,12 @@ def main():
             (obs.shape[0], 1)
         )  # (T,2)
 
-        if pln is not None:
-            pln = _ensure_2d(np.asarray(pln, dtype=np.float32))  # (T, 2M)
-            assert pln.shape[0] == obs.shape[0], "T mismatch in plan"
-            plans.append(pln)
-            have_plan = True
+#※二回appendしてしまっている！
+#        if pln is not None:
+#            pln = _ensure_2d(np.asarray(pln, dtype=np.float32))  # (T, 2M)
+#            assert pln.shape[0] == obs.shape[0], "T mismatch in plan"
+#            plans.append(pln)
+#            have_plan = True
 
         observations.append(obs)
         actions.append(act)

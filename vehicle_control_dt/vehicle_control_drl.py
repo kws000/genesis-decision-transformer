@@ -32,6 +32,24 @@ OBS_V2_KEYS = [
     "vmax_min_hH","vmax_mean_hH","vmax_slope_hH","limit_v_target",
 ]
 
+def compute_perp_error(pos, wp0, wp1, lane_half_width=2.0):
+    segment = wp1 - wp0
+    seg_len = np.linalg.norm(segment)
+
+    if seg_len < 1e-6:
+        return 0.0
+
+    seg_dir = segment / seg_len
+    rel = pos - wp0
+
+    # 符号付き横ずれ[m]
+    signed_dist = rel[0] * seg_dir[1] - rel[1] * seg_dir[0]
+
+    # 車線半幅で正規化
+    perp_error = signed_dist / lane_half_width
+
+    return float(perp_error)
+
 def build_obs_v2_pure(pos_xy, yaw, vel, passed,
                       target_wp, target_next_wp,
                       waypoint_idx, waypoint_direc, WAYPOINTS,
@@ -49,11 +67,13 @@ def build_obs_v2_pure(pos_xy, yaw, vel, passed,
     # ヘディング誤差（-pi..pi）
     heading_error = (target_yaw - yaw + np.pi) % (2*np.pi) - np.pi
 
-    # CTE 近似（方向ベクトル内積から）
-    tdir = (target_wp - pos_xy); tdir = tdir / (np.linalg.norm(tdir) + 1e-9)
-    sdir = segment / (np.linalg.norm(segment) + 1e-9)
-    perp_error = 1.0 - float(np.dot(tdir, sdir))
-    # 初手だけ無視する等のルールは上位で適用可
+#perp_errorを本来の道幅からのずれ具合に
+    perp_error = compute_perp_error(pos_xy, target_wp, target_next_wp, lane_half_width=2.0)
+#    # CTE 近似（方向ベクトル内積から）
+#    tdir = (target_wp - pos_xy); tdir = tdir / (np.linalg.norm(tdir) + 1e-9)
+#    sdir = segment / (np.linalg.norm(segment) + 1e-9)
+#    perp_error = 1.0 - float(np.dot(tdir, sdir))
+#    # 初手だけ無視する等のルールは上位で適用可
 
     # ego変換
     target_wp_relative_x =  math.cos(yaw)*dx + math.sin(yaw)*dy
