@@ -553,11 +553,11 @@ class GenesisScene:
 #        elif self.is_off_track(obs):
 #            reward -= 1.0  # 罰として明確に伝える
 #            #回復の見込みが普通にあるので終了niacinamide
-        elif self.t > 10.0 and self.reward_total <= 0:
+        elif self.t > 20.0 and self.reward_total <= 0:
             # 成功の可能性が低い
             reward -= 1000
             done = True            
-        elif self.t > 60.0:
+        elif self.t > 90.0:
             # 時間かかりすぎ終了
             reward -= 1000
             done = True            
@@ -568,13 +568,13 @@ class GenesisScene:
         elif self.reward_total < -250:
             # 大きく損失していてもう回復が見込みめない
             done = True
-        elif self.zero_throttle_time > 1.0:
+        elif self.zero_throttle_time > 2.0:
             # ずっとアクセルを踏んでいない
             reward -= 100
             # ペナルティは払ったのでクリアする
             self.zero_throttle_time = 0.0
 #            done = True
-        elif self.zero_speed_time > 1.0:
+        elif self.zero_speed_time > 2.0:
             # ずっとアクセルを踏んでいない
             reward -= 100
             # ペナルティは払ったのでクリアする

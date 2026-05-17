@@ -50,21 +50,23 @@ BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
 BABY_STEP = 3
 
 step_configs = [
-    #進化ループの大改修 低学年では全員合格
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-
-    # ここからが本番で試験あり
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
-    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#損失に世界モデルを使う ステートをフィードバック更新する Nan対策 contextlen=2以上が必要
+#      
+#    #進化ループの大改修 低学年では全員合格
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#
+#    # ここからが本番で試験あり
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
+#    {"context_len": 1, "n_layer": 3, "n_head": 4},
 
     {"context_len": 2, "n_layer": 3, "n_head": 4},
     {"context_len": 2, "n_layer": 3, "n_head": 4},
