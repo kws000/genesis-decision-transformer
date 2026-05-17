@@ -1,0 +1,17 @@
+
+１）
+	vehicle_control_dt\data_dt\snapshots 以下のds***フォルダをそのまま、
+	このフォルダへコピー
+
+２）ワールドモデルの学習
+
+	cd C:\Users\kws00\Genesis4D\my_projects\genesis-decision-transformer\vehicle_control_dt
+
+	python world_training\laws\train_world_mlp.py --epochs 50
+
+３）推論で確認
+
+	python world_training\laws\infer_world_mlp.py --ds all --summary_only --horizon 5
+
+
+
