@@ -21,6 +21,13 @@ from typing import Optional, Dict, Tuple
 
 import os, json
 
+#損失に世界モデルを使う
+from world_training.laws.world_model_runtime import (
+    WorldModelRuntime,
+    default_paths_from_project,
+)
+
+
 TIMESTEP_MAX = 4000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,6 +41,8 @@ BASE_NORM_PKL = "data_dt/base_mean_std.pkl"   # ★固定統計
 # ここで暫定モデル temp_model.pt がロードされる
 CHECKPOINT_PATH = "checkpoints/temp_model.pt"
 
+#損失に世界モデルを使う
+WORLD_TRAINING_DIR = "world_training"
 
 #進化ループの大改修	推論側 パス定数廃止
 #PKL_PATH = "data_dt/trajectories_dt.pkl"
@@ -183,6 +192,15 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
 #        n_head=n_head
     ).to(DEVICE)
 
+    #損失に世界モデルを使う
+    project_root = os.path.dirname(os.path.abspath(__file__))
+
+    model_path, mean_std_path = default_paths_from_project(project_root)
+
+    wm_runtime = WorldModelRuntime(
+        model_path=model_path,
+        mean_std_path=mean_std_path,
+    )
 
 #ボトルネック認識とVmax魂の注入 7.2 
     assert traj["observations"].shape[1] == 19, f"OBS_V2(19) 想定。got {traj['observations'].shape[1]}"
@@ -251,6 +269,8 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
     viol_cnt = 0
     steps_cnt = 0
 
+    prev_action = None
+
     for t in range(100_000):
 
         # 正規化＋テンソル化
@@ -309,6 +329,27 @@ def run_inference_once(context_len, n_layer, n_head,norm_path,pkl_path,checkpoin
                     debug_plan_xy = plan_hat[0].cpu().numpy()       # (2M,)
 #                env.scene.debug_draw_plan_xy(debug_plan_xy)
                 env.scene.debug_draw_plan_compare(debug_plan_xy)
+
+            #損失に世界モデルを使う　可視化
+            if prev_action is not None :
+
+                wm_line = wm_runtime.debug_line(
+                    obs_norm=obs_norm,
+                    prev_action=prev_action,
+                    action=action_pred,
+                    prefix="[DebugAllow + WM]",
+                )
+#                print(wm_line)
+
+                #デバッグアロー表示
+                wm_dict = wm_runtime.debug_dict(
+                    obs_norm=obs_norm,
+                    prev_action=prev_action,
+                    action=action_pred,
+                )
+                env.scene.debug_draw_world_modeling(wm_dict,scale=1.0)
+
+            prev_action=action_pred
 
         # step: Gymnasium専用（5タプル）
         obs, reward, terminated, truncated, info = env.step(action)

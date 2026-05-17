@@ -6,6 +6,8 @@ import gym
 import numpy as np
 from gym import spaces
 
+import config
+
 import genesis as gs # type: ignore
 from genesis.utils.geom  import euler_to_quat # type: ignore
 
@@ -115,17 +117,11 @@ class GenesisScene:
 
         # 現在チェックポイントのインデックス
 
-        self.stable_step = 0
-
-#最新モデルでリプレイする※作りかけ封印
-#        if REPLAY_MODE:
-#            self.stable_step = self.get_latest_stable_step()
-#            self.start_waypoint_idx,self.waypoint_direc = self.get_replay_info(self.stable_step)
-#        else:
-#            self.waypoint_direc = -1 if random.randint(0,100) < 50 else 1#1で正方向、-1で逆方向
-#            self.start_waypoint_idx = random.randint(0, len(self.waypoints)-1)
-        self.waypoint_direc = -1 if random.randint(0,100) < 50 else 1#1で正方向、-1で逆方向
-        self.start_waypoint_idx = random.randint(0, len(self.waypoints)-1)
+        if config.REPLAY_MODE:
+            self.start_waypoint_idx,self.waypoint_direc = self.get_replay_info()
+        else:
+            self.start_waypoint_idx = random.randint(0, len(self.waypoints)-1)
+            self.waypoint_direc = -1 if random.randint(0,100) < 50 else 1#1で正方向、-1で逆方向
 
         self.end_waypoint_idx = (self.start_waypoint_idx - self.waypoint_direc) % len(self.waypoints)
         self.waypoint_idx = self.start_waypoint_idx
@@ -143,6 +139,8 @@ class GenesisScene:
         self.debug_arrow_plan = None
 
         self.debug_plan_arrows = []
+
+        self.debug_wm_arrows = []
 
         self.lock = threading.Lock()
         self.kick_step = False
@@ -180,11 +178,9 @@ class GenesisScene:
     
     # === リプレイ情報取得ヘルパー ===
 
-    #最新モデルでリプレイする※作りかけ封印
-    def get_replay_info(self,stable_step):
-        replay_path = f"checkpoints/step{stable_step}_replay.txt"
+    def get_replay_info(self):
         try:
-            with open(replay_path, "r") as f:
+            with open("replay_info.txt", "r") as f:
                 return int(f.readline().strip()),int(f.readline().strip())
         except Exception as e:
             print(f"⚠️ リプレイ情報読み込み失敗: {e}")
@@ -196,36 +192,51 @@ class GenesisScene:
 
     def generate_bernoulli_waypoints(
             self,
-            num_points: int = 600,      # resolution of the full ∞
-            a: float = 0.5,             # the “a” from (x²+y²)² = a²(x²−y²)
-            center=np.zeros(3)          # optional offset of the whole curve
+            num_points: int = 600,
+            a: float = 8.0,
+            center=np.zeros(3)
     ) -> np.ndarray:
         """
-        Return (N, 3) way-points for a Bernoulli figure-eight centered at `center`.
-        The curve lies in the XY-plane (Z = 0).
+        Continuous Bernoulli lemniscate figure-eight.
 
-        Parametric form  (t ∈ (−π/2,  π/2)  for the right lobe):
-            x =  a·√2·cos t / (1 + sin² t)
-            y =  a·√2·cos t·sin t / (1 + sin² t)
+        Important:
+            半分を作ってmirrorするのではなく、
+            t=0〜2π を連続的にサンプリングする。
 
-        We sample that half-lobe, then mirror it to obtain the left half,
-        giving a closed, symmetric ∞.
+        Formula:
+            x = a√2 cos(t) / (1 + sin(t)^2)
+            y = a√2 cos(t) sin(t) / (1 + sin(t)^2)
         """
-        # sample one half-lobe (avoid end-point singularities)
-        t = np.linspace(-math.pi/2 + 1e-3,
-                        math.pi/2 - 1e-3,
-                        num_points // 2,
-                        endpoint=False)
+        import numpy as np
+        import math
 
-        x_half =  a * math.sqrt(2) * np.cos(t) / (1 + np.sin(t)**2)
-        y_half =  a * math.sqrt(2) * np.cos(t) * np.sin(t) / (1 + np.sin(t)**2)
+        t = np.linspace(
+            0.0,
+            2.0 * math.pi,
+            num_points,
+            endpoint=False,
+            dtype=np.float32,
+        )
 
-        # mirror to make the other lobe
-        x_full = np.concatenate([ x_half, -x_half ])
-        y_full = np.concatenate([ y_half, -y_half ])
+        sin_t = np.sin(t)
+        cos_t = np.cos(t)
 
-        pts = np.stack([x_full, y_full, np.zeros_like(x_full)], axis=1)
-        return pts + center
+        denom = 1.0 + sin_t ** 2
+
+        x = a * math.sqrt(2.0) * cos_t / denom
+        y = a * math.sqrt(2.0) * cos_t * sin_t / denom
+
+        pts = np.stack(
+            [
+                x,
+                y,
+                np.zeros_like(x),
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        return pts + np.asarray(center, dtype=np.float32)
+
 
     def get_wp_position(self,wp_idx: int,waypoints: np.ndarray):
 
@@ -378,6 +389,48 @@ class GenesisScene:
         else:
             return False, current_wp_idx
 
+    #perp_errorを厳密に最近接セグメントから
+    def point_to_segment_distance_2d(self,p, a, b):
+        """点pと線分abの最短距離と、最近点q、パラメータt(0..1)を返す"""
+        ap = p - a
+        ab = b - a
+        ab2 = float(np.dot(ab, ab))
+        if ab2 < 1e-12:
+            q = a
+            return float(np.linalg.norm(p - q)), q, 0.0
+        t = float(np.dot(ap, ab) / ab2)
+        t = max(0.0, min(1.0, t))
+        q = a + t * ab
+        return float(np.linalg.norm(p - q)), q, t
+
+    #perp_errorを厳密に最近接セグメントから
+    def check_near_lateral_distance_to_centerline(self,pos_xy, waypoints_xy, idx_center, direc, window=30):
+        """
+        近傍window区間だけ探索して、中心線（折れ線）からの最短距離を返す。
+        idx_center: 現在追っている waypoint_idx（近傍探索の中心）
+        direc: +1 or -1
+        """
+        wp = np.asarray(waypoints_xy, dtype=np.float32)
+        N = wp.shape[0]
+        p = np.asarray(pos_xy, dtype=np.float32)
+
+        best_d = 1e9
+        best_idx = idx_center
+
+        # idx_center 近傍の線分を探索（全探索より軽い）
+        for k in range(-window, window):
+            i0 = (idx_center + k * direc) % N
+            i1 = (i0 + direc) % N
+            a = wp[i0][:2]
+            b = wp[i1][:2]
+            d, q, _ = self.point_to_segment_distance_2d(p, a, b)
+            if d < best_d:
+                best_idx = i1
+                best_d = d
+
+        return best_idx
+
+
 
     def _load_car(self):
         return self.scene.add_entity(
@@ -423,8 +476,10 @@ class GenesisScene:
             self.t = 0.0
 
         # 開始チェックポイントの決定
-        self.waypoint_direc = -1 if random.randint(0,100) < 50 else 1#1で正方向、-1で逆方向
-        self.start_waypoint_idx = random.randint(0, len(self.waypoints)-1)
+        if config.REPLAY_MODE is None:
+            self.waypoint_direc = -1 if random.randint(0,100) < 50 else 1#1で正方向、-1で逆方向
+            self.start_waypoint_idx = random.randint(0, len(self.waypoints)-1)
+
         self.end_waypoint_idx = (self.start_waypoint_idx - self.waypoint_direc) % len(self.waypoints)
         self.waypoint_idx = self.start_waypoint_idx
 
@@ -668,9 +723,6 @@ class GenesisScene:
         # 必要なら print して確認
         # print(f"[DBG] yaw={yaw:.3f}  fwd_world={W_unit[0]-pos_xy}  left_world={W_unit[1]-pos_xy}")
 
-
-
-
     def debug_draw_plan_xy(self, plan_xy_1d):
         """
         plan_xy_1d: shape (2M,) の 1D 配列（ego座標: [x1,y1,x2,y2,...]）
@@ -718,6 +770,110 @@ class GenesisScene:
                 color=(0.0, 1.0, 1.0, 0.5),
             )
             self.debug_plan_arrows.append(debug_obj)
+
+
+    #損失に世界モデルを使う　可視化
+    def debug_draw_world_modeling(self, wm_debug_dict, scale=2.0):
+        """
+        World Modelの1step予測をデバッグ描画する。
+
+        wm_debug_dict:
+            wm_runtime.debug_dict(...) の戻り値
+
+        表示内容:
+            - 現在位置から、予測perp変化方向へ小さい矢印
+            - heading予測方向の矢印
+        """
+        import math
+        import numpy as np
+
+        if not hasattr(self, "debug_wm_arrows"):
+            self.debug_wm_arrows = []
+
+        # 既存WM矢印をクリア
+        for obj in self.debug_wm_arrows:
+            self.scene.clear_debug_object(obj)
+        self.debug_wm_arrows.clear()
+
+        perp_now = float(wm_debug_dict["perp_now"])
+        perp_next = float(wm_debug_dict["wm_perp_next"])
+        head_now = float(wm_debug_dict["heading_now"])
+        head_next = float(wm_debug_dict["wm_heading_next"])
+
+        d_perp = perp_next - perp_now
+        d_head = head_next - head_now
+
+        # 車の現在姿勢 world
+        pos_xy = np.array(self.car.get_dofs_position()[:2], np.float32)
+
+        quat = self.car.get_links_quat()[0]  # (w,x,y,z)
+        siny_cosp = 2 * (quat[0] * quat[3] + quat[1] * quat[2])
+        cosy_cosp = 1 - 2 * (quat[2] ** 2 + quat[3] ** 2)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        c, s = math.cos(yaw), math.sin(yaw)
+
+        # 車体前方向・左方向
+        forward = np.array([c, s], dtype=np.float32)
+        left = np.array([-s, c], dtype=np.float32)
+
+        # --------------------------------------------------
+        # 1. perp_error変化の矢印
+        # --------------------------------------------------
+        # perp_errorが増える方向を左方向として描く
+        # 符号が逆に見えたら -left にしてください
+        # 推論が正しければ常に道路の中央を指す
+#はずれをストレートに表示
+        perp_vec_xy = left * (perp_next * scale)
+#        perp_vec_xy = -left * (d_perp * scale)
+
+        debug_obj = self.scene.draw_debug_arrow(
+            pos=(float(pos_xy[0]), float(pos_xy[1]), 0.30),
+            vec=(float(perp_vec_xy[0]), float(perp_vec_xy[1]), 0.00),
+            radius=0.01,
+            color=(1.0, 0.0, 1.0, 0.8),  # magenta
+        )
+        self.debug_wm_arrows.append(debug_obj)
+
+        # --------------------------------------------------
+        # 2. heading予測方向の矢印
+        # --------------------------------------------------
+        # head_nextを車体yawに足して、予測姿勢方向として表示
+        pred_yaw = yaw + d_head
+
+        cp, sp = math.cos(pred_yaw), math.sin(pred_yaw)
+        pred_forward = np.array([cp, sp], dtype=np.float32)
+
+        heading_arrow_len = 1.0
+
+        start = pos_xy + forward * 0.5
+
+        debug_obj = self.scene.draw_debug_arrow(
+            pos=(float(start[0]), float(start[1]), 0.45),
+            vec=(
+                float(pred_forward[0] * heading_arrow_len),
+                float(pred_forward[1] * heading_arrow_len),
+                0.00,
+            ),
+            radius=0.01,
+            color=(1.0, 1.0, 0.0, 0.8),  # yellow
+        )
+        self.debug_wm_arrows.append(debug_obj)
+
+        # --------------------------------------------------
+        # 3. 危険度補助: outside方向が強い場合は赤矢印
+        # --------------------------------------------------
+        if abs(perp_next) > 1.0:
+            risk_vec_xy = left * (np.sign(perp_next) * 0.8)
+
+            debug_obj = self.scene.draw_debug_arrow(
+                pos=(float(pos_xy[0]), float(pos_xy[1]), 0.60),
+                vec=(float(risk_vec_xy[0]), float(risk_vec_xy[1]), 0.00),
+                radius=0.015,
+                color=(1.0, 0.0, 0.0, 0.9),  # red
+            )
+            self.debug_wm_arrows.append(debug_obj)
+
 
     def compute_perp_error(self,pos, wp0, wp1, lane_half_width=2.0):
         segment = wp1 - wp0
@@ -817,9 +973,19 @@ class GenesisScene:
         heading_error = target_yaw - yaw
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
-#perp_errorを本来の道幅からのずれ具合に
-        perp_error = self.compute_perp_error(pos, target_wp, target_next_wp, lane_half_width=2.0)
-#        # perp_errorは道路方向とのずれ
+        # perp_errorは道路方向とのずれ
+
+#perp_errorを厳密に最近接セグメントから
+        near_waypoint_idx = self.check_near_lateral_distance_to_centerline(
+            pos_xy=pos,
+            waypoints_xy=self.waypoints,   # (N,2)
+            idx_center=self.waypoint_idx,
+            direc=self.waypoint_direc * (-1), #手前側に探索
+            window=40
+        )
+        near_wp = self.get_wp_position(near_waypoint_idx,self.waypoints)
+        near_next_wp = self.get_wp_position(near_waypoint_idx+self.waypoint_direc,self.waypoints)
+        perp_error = self.compute_perp_error(pos, near_wp, near_next_wp, lane_half_width=2.0)
 #        target_dir = target_wp - pos
 #        target_dir = target_dir / np.linalg.norm(target_dir)
 #        segment_dir = segment / np.linalg.norm(segment)

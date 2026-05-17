@@ -12,12 +12,29 @@ from model_dt import DecisionTransformer
 # sampler
 from train_dt import SnapshotBinMixerDataset
 
+#損失に世界モデルを使う
+from world_training.laws.world_model_runtime import (
+    WorldModelRuntime,
+    default_paths_from_project,
+)
+
+#損失に世界モデルを使う 損失とつなぐ
+import torch.nn.functional as F
+
+try:
+    from world_training.laws.world_mlp import WorldMLP
+except ModuleNotFoundError:
+    from world_training.laws.world_mlp import WorldMLP
+
 #学習の重さの理由？無効化してみる
 os.environ["MPLBACKEND"] = "Agg"  # これが一番確実
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT_DIR = "checkpoints"
+
+#損失に世界モデルを使う
+WORLD_TRAINING_DIR = "world_training"
 
 # ====== hyper (keep yours) ======
 BATCH_SIZE = 64
@@ -43,6 +60,121 @@ STEPS_PER_EPOCH = 2000#50#※多すぎるのであとで調整
 #STEPS_PER_EPOCH = 2000
 
 NUM_SAMPLES = BATCH_SIZE * STEPS_PER_EPOCH  # 128_000
+
+
+		
+#損失に世界モデルを使う 損失とつなぐ
+IDX_PERP = 7
+IDX_HEAD = 8
+
+USE_WORLD_LOSS = True
+LAMBDA_WM = 0.03#0.01
+
+WM_INPUT_DIM = 23
+WM_OUTPUT_DIM = 19
+WM_HIDDEN_DIM = 128
+
+
+#損失に世界モデルを使う 損失とつなぐ
+def compute_world_reflex_loss(
+    wm,
+    states,
+    actions_gt,
+    pred_actions,
+):
+    """
+    states:
+        (B,T,19) normalized obs
+
+    actions_gt:
+        (B,T,2) teacher actions
+        prev_action作成用
+
+    pred_actions:
+        (B,T,2) DT predicted actions
+
+    return:
+        scalar loss
+    """
+    if wm is None:
+        return states.new_tensor(0.0)
+
+    B, T, obs_dim = states.shape
+
+    if T < 1:
+        return states.new_tensor(0.0)
+
+    # prev_action[t]
+    prev_actions = torch.zeros_like(actions_gt)
+    if T > 1:
+        prev_actions[:, 1:] = actions_gt[:, :-1]
+
+    # World Model input:
+    # obs_t + prev_action_t + pred_action_t
+    wm_x = torch.cat(
+        [
+            states,
+            prev_actions,
+            pred_actions,
+        ],
+        dim=-1,
+    )  # (B,T,23)
+
+    wm_x_flat = wm_x.reshape(B * T, -1)
+
+    delta_next_flat = wm(wm_x_flat)
+    delta_next = delta_next_flat.reshape(B, T, obs_dim)
+
+    wm_next = states + delta_next
+
+    perp_now = states[..., IDX_PERP]
+    head_now = states[..., IDX_HEAD]
+
+    perp_next = wm_next[..., IDX_PERP]
+    head_next = wm_next[..., IDX_HEAD]
+
+    # 悪化した分だけ罰する
+    loss_perp = F.relu(torch.abs(perp_next) - torch.abs(perp_now)).mean()
+    loss_head = F.relu(torch.abs(head_next) - torch.abs(head_now)).mean()
+
+    loss_wm = loss_perp + loss_head
+
+    return loss_wm
+
+#損失に世界モデルを使う 損失とつなぐ
+def load_frozen_world_model(project_root, device):
+    wm_path = os.path.join(
+        project_root,
+        "world_training",
+        "models",
+        "world_mlp.pt",
+    )
+
+    if not os.path.exists(wm_path):
+        print(f"[WM] not found: {wm_path}")
+        return None
+
+    ckpt = torch.load(
+        wm_path,
+        map_location=device,
+        weights_only=False,
+    )
+
+    wm = WorldMLP(
+        input_dim=ckpt.get("input_dim", WM_INPUT_DIM),
+        output_dim=ckpt.get("output_dim", WM_OUTPUT_DIM),
+        hidden_dim=ckpt.get("hidden_dim", WM_HIDDEN_DIM),
+    ).to(device)
+
+    wm.load_state_dict(ckpt["model_state_dict"])
+    wm.eval()
+
+    for p in wm.parameters():
+        p.requires_grad_(False)
+
+    print(f"[WM] loaded frozen world model: {wm_path}")
+
+    return wm
 
 
 def get_latest_checkpoint():
@@ -122,6 +254,22 @@ def train_external(context_len, n_layer, n_head, checkpoint_path, embed_dim=128)
         idle_throttle_init=0.0908,
         use_focus=USE_FOCUS
     ).to(DEVICE)
+
+    #損失に世界モデルを使う
+    project_root = os.path.dirname(os.path.abspath(__file__))
+
+    model_path, mean_std_path = default_paths_from_project(project_root)
+
+    wm_runtime = WorldModelRuntime(
+        model_path=model_path,
+        mean_std_path=mean_std_path,
+    )
+
+	#損失に世界モデルを使う 損失とつなぐ
+    wm_model = None
+    if USE_WORLD_LOSS:
+        wm_model = load_frozen_world_model(project_root, DEVICE)
+
 
     def _probe_zero_once(tag: str):
         model.eval()
@@ -224,7 +372,15 @@ def train_external(context_len, n_layer, n_head, checkpoint_path, embed_dim=128)
             low_speed_denom = low_speed_mask.sum() + 1e-6
             L_low_speed = (( pred_th <= 0.05) * low_speed_mask ).sum() / low_speed_denom
 
-            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth + W_SM * L_sm + W_LOW_SPEED * L_low_speed
+			#損失に世界モデルを使う 損失とつなぐ
+            L_wm = compute_world_reflex_loss(
+                wm=wm_model,
+                states=states,
+                actions_gt=actions,
+                pred_actions=pred_actions,
+            )
+
+            loss = W_ACT * L_act + W_PLAN * L_plan + W_SMOOTH * L_smooth + W_SM * L_sm + W_LOW_SPEED * L_low_speed + LAMBDA_WM * L_wm
 
             optimizer.zero_grad()
             loss.backward()
@@ -239,6 +395,8 @@ def train_external(context_len, n_layer, n_head, checkpoint_path, embed_dim=128)
             print(
                 f"Epoch {epoch+1:03d} ({counter}/{len(dataloader)}) | L={avg_loss:.5f} "
                 f"| L_act={L_act.item():.4f} | L_plan={L_plan.item():.4f} "
+                #損失に世界モデルを使う 損失とつなぐ
+                f"| L_wm={L_wm.item():.6f} "
                 f"| L_smooth={L_smooth.item():.4f} | L_sm_cond={L_sm.item():.4f} | L_low_spd={L_low_speed.item():.4f} "
             )
 

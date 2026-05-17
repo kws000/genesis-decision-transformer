@@ -4,6 +4,8 @@ import time
 import shutil
 import re
 
+import config
+
 import os, glob, shutil, time, json
 from pathlib import Path
 
@@ -12,7 +14,6 @@ import os
 
 import random
 from typing import Optional, Iterable
-
 
 #ボトルネック認識とVmax魂の注入 アクセルが小さすぎる問題 経過確認ログ
 from debug_probes import probe_csv,probe_raw_pkl,probe_dt
@@ -35,7 +36,6 @@ TMP_FILES = [
 
 
 #最新モデルでリプレイする　別手法
-REPLAY_MODE = False#True#False
 CHECKPOINTS_DIR = "checkpoints"
 
 # ここで暫定モデル temp_model.pt がロードされる
@@ -383,6 +383,7 @@ def get_score():
         return -float("inf")
 
 # === リプレイ情報取得ヘルパー ===
+#リプレイ不具合修正
 def get_replay_info():
     try:
         with open("replay_info.txt", "r") as f:
@@ -390,6 +391,14 @@ def get_replay_info():
     except Exception as e:
         print(f"⚠️ リプレイ情報読み込み失敗: {e}")
         return -int("0"),-int("0")
+
+#def get_replay_info():
+#    try:
+#        with open("replay_info.txt", "r") as f:
+#            return int(f.readline().strip()),int(f.readline().strip())
+#    except Exception as e:
+#        print(f"⚠️ リプレイ情報読み込み失敗: {e}")
+#        return -int("0"),-int("0")
 
 def Replay():
 
@@ -597,7 +606,7 @@ def Evolution():
 def main():
 
     #最新モデルでリプレイする　別手法
-    if REPLAY_MODE:
+    if config.REPLAY_MODE:
         Replay()
     else:
         Evolution()

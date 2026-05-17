@@ -32,6 +32,33 @@ OBS_V2_KEYS = [
     "vmax_min_hH","vmax_mean_hH","vmax_slope_hH","limit_v_target",
 ]
 
+#perp_errorを厳密に最近接セグメントから
+def check_near_lateral_distance_to_centerline(pos_xy, waypoints_xy, idx_center, direc, window=30):
+    """
+    近傍window区間だけ探索して、中心線（折れ線）からの最短距離を返す。
+    idx_center: 現在追っている waypoint_idx（近傍探索の中心）
+    direc: +1 or -1
+    """
+    wp = np.asarray(waypoints_xy, dtype=np.float32)
+    N = wp.shape[0]
+    p = np.asarray(pos_xy, dtype=np.float32)
+
+    best_d = 1e9
+    best_idx = idx_center
+
+    # idx_center 近傍の線分を探索（全探索より軽い）
+    for k in range(-window, window):
+        i0 = (idx_center + k * direc) % N
+        i1 = (i0 + direc) % N
+        a = wp[i0][:2]
+        b = wp[i1][:2]
+        d, q, _ = point_to_segment_distance_2d(p, a, b)
+        if d < best_d:
+            best_idx = i1
+            best_d = d
+
+    return best_idx
+
 def compute_perp_error(pos, wp0, wp1, lane_half_width=2.0):
     segment = wp1 - wp0
     seg_len = np.linalg.norm(segment)
@@ -67,13 +94,18 @@ def build_obs_v2_pure(pos_xy, yaw, vel, passed,
     # ヘディング誤差（-pi..pi）
     heading_error = (target_yaw - yaw + np.pi) % (2*np.pi) - np.pi
 
-#perp_errorを本来の道幅からのずれ具合に
-    perp_error = compute_perp_error(pos_xy, target_wp, target_next_wp, lane_half_width=2.0)
-#    # CTE 近似（方向ベクトル内積から）
-#    tdir = (target_wp - pos_xy); tdir = tdir / (np.linalg.norm(tdir) + 1e-9)
-#    sdir = segment / (np.linalg.norm(segment) + 1e-9)
-#    perp_error = 1.0 - float(np.dot(tdir, sdir))
-#    # 初手だけ無視する等のルールは上位で適用可
+#perp_errorを厳密に最近接セグメントから
+    near_waypoint_idx = check_near_lateral_distance_to_centerline(
+        pos_xy = pos_xy,
+        waypoints_xy = WAYPOINTS,   # (N,2)
+        idx_center = waypoint_idx,
+        direc = waypoint_direc * (-1), #手前側に探索
+        window = 40
+    )
+    near_wp = get_wp_position(near_waypoint_idx,WAYPOINTS)
+    near_next_wp = get_wp_position(near_waypoint_idx+waypoint_direc,WAYPOINTS)
+    perp_error = compute_perp_error(pos_xy, near_wp, near_next_wp, lane_half_width=2.0)
+#    perp_error = compute_perp_error(pos_xy, target_wp, target_next_wp, lane_half_width=2.0)
 
     # ego変換
     target_wp_relative_x =  math.cos(yaw)*dx + math.sin(yaw)*dy
@@ -134,42 +166,55 @@ class ControlMLP(torch.nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
 # ---------------------------------------------------------------------------
 # 1) 生成する 8 の字 Waypoints
 # ---------------------------------------------------------------------------
 
 def generate_bernoulli_waypoints(
-        num_points: int = 600,      # resolution of the full ∞
-        a: float = 0.5,             # the “a” from (x²+y²)² = a²(x²−y²)
-        center=np.zeros(3)          # optional offset of the whole curve
+        num_points: int = 600,
+        a: float = 8.0,
+        center=np.zeros(3)
 ) -> np.ndarray:
     """
-    Return (N, 3) way-points for a Bernoulli figure-eight centered at `center`.
-    The curve lies in the XY-plane (Z = 0).
+    Continuous Bernoulli lemniscate figure-eight.
 
-    Parametric form  (t ∈ (−π/2,  π/2)  for the right lobe):
-        x =  a·√2·cos t / (1 + sin² t)
-        y =  a·√2·cos t·sin t / (1 + sin² t)
+    Important:
+        半分を作ってmirrorするのではなく、
+        t=0〜2π を連続的にサンプリングする。
 
-    We sample that half-lobe, then mirror it to obtain the left half,
-    giving a closed, symmetric ∞.
+    Formula:
+        x = a√2 cos(t) / (1 + sin(t)^2)
+        y = a√2 cos(t) sin(t) / (1 + sin(t)^2)
     """
-    # sample one half-lobe (avoid end-point singularities)
-    t = np.linspace(-math.pi/2 + 1e-3,
-                     math.pi/2 - 1e-3,
-                     num_points // 2,
-                     endpoint=False)
+    import numpy as np
+    import math
 
-    x_half =  a * math.sqrt(2) * np.cos(t) / (1 + np.sin(t)**2)
-    y_half =  a * math.sqrt(2) * np.cos(t) * np.sin(t) / (1 + np.sin(t)**2)
+    t = np.linspace(
+        0.0,
+        2.0 * math.pi,
+        num_points,
+        endpoint=False,
+        dtype=np.float32,
+    )
 
-    # mirror to make the other lobe
-    x_full = np.concatenate([ x_half, -x_half ])
-    y_full = np.concatenate([ y_half, -y_half ])
+    sin_t = np.sin(t)
+    cos_t = np.cos(t)
 
-    pts = np.stack([x_full, y_full, np.zeros_like(x_full)], axis=1)
-    return pts + center
+    denom = 1.0 + sin_t ** 2
+
+    x = a * math.sqrt(2.0) * cos_t / denom
+    y = a * math.sqrt(2.0) * cos_t * sin_t / denom
+
+    pts = np.stack(
+        [
+            x,
+            y,
+            np.zeros_like(x),
+        ],
+        axis=1,
+    ).astype(np.float32)
+
+    return pts + np.asarray(center, dtype=np.float32)
 
 # システム
 
